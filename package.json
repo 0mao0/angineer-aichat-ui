@@ -3,6 +3,10 @@
   "version": "0.1.7",
   "type": "module",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/0mao0/angineer-aichat-ui.git"
+  },
   "publishConfig": {
     "access": "public"
   },
