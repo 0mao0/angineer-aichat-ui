@@ -74,3 +74,46 @@ test('发送消息不会把会话写入 localStorage（不做历史记录）', a
   const poolKeys = [...storage.keys()].filter((key) => key.includes('ai-chat-pool'))
   assert.deepEqual(poolKeys, [])
 })
+
+test('loadMessages 灌入历史消息并写回会话池', async () => {
+  const chat = useAIChat({ scene: 'docs', sessionId: 'load-msgs' })
+  const history: Parameters<typeof chat.loadMessages>[0] = [
+    { id: 'u1', role: 'user', content: '历史问题', timestamp: 1 },
+    { id: 'a1', role: 'assistant', content: '历史回答', timestamp: 2 }
+  ]
+  chat.loadMessages(history)
+  assert.equal(chat.messages.value.length, 2)
+  assert.equal(getSessionSnapshot('docs:load-msgs')?.messages.length, 2)
+})
+
+test('@文档 提及把文档 id 合并进 doc_ids（document 类型才进，块级引用不进）', async () => {
+  const { calls, query } = makeQuery()
+  const chat = useAIChat({ scene: 'docs', sessionId: 'doc-mention', query })
+
+  await chat.sendMessage({
+    content: '《规范A》里怎么规定',
+    citations: [
+      {
+        id: 'cit_doc1',
+        label: '《规范A》',
+        triggerText: '规范A',
+        range: { start: 0, end: 5 },
+        reference: { targetId: 'doc-a', targetType: 'document', docId: 'doc-a', docTitle: '规范A.pdf' },
+        status: 'active'
+      },
+      {
+        id: 'cit_blk1',
+        label: '第3条',
+        triggerText: '第3条',
+        range: { start: 6, end: 9 },
+        reference: { targetId: 'blk-1', targetType: 'content', docId: 'doc-b', docTitle: '规范B.pdf' },
+        status: 'active'
+      }
+    ]
+  })
+
+  assert.equal(calls.length, 1)
+  assert.deepEqual(calls[0].doc_ids, ['doc-a'])
+  // 内联引用原样透传给后端
+  assert.equal(calls[0].inline_citations?.length, 2)
+})

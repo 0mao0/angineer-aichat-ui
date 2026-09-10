@@ -18,14 +18,23 @@
     :streaming-thinking-steps="liveThinkingSteps"
     :search-citations="searchInlineCitations"
     :render-message="renderAIChatMessage"
-    :allow-image-upload="false"
+    :hero="hero"
+    :library-options="libraryOptions"
+    :library-value="libraryValue"
+    :queued-messages="queuedMessages"
+    :mention-label="mentionMode === 'document' ? '提及文档 @' : '插入引用 @'"
     @send="handleSend"
     @clear="clearMessages"
     @stop="stopGeneration"
+    @remove-queued="removeQueued"
+    @promote-queued="promoteQueued"
     @remove-context="handleRemoveContext"
     @ready="handleReady"
     @select-citation="handleSelectCitation"
-  />
+    @update:library-value="emit('update:libraryValue', $event)"
+  >
+    <template #hero><slot name="hero" /></template>
+  </BaseChat>
 </template>
 
 <script setup lang="ts">
@@ -34,7 +43,7 @@
  * 封装 BaseChat + useAIChat + 模型获取 + Markdown 渲染。
  * 通过 scene + sessionId 区分不同场景，后端自动路由。
  */
-import { onMounted, ref, computed } from 'vue'
+import { onMounted, ref, computed, watch } from 'vue'
 import BaseChat from './BaseChat.vue'
 import { useAIChat } from '../composables/useAIChat'
 import { renderMarkdownToHtml } from '../utils/markdown'
@@ -61,13 +70,24 @@ interface Props {
   scene?: string
   sessionId?: string
   libraryId?: string
+  /** Hero 模式（透传 BaseChat）：无消息时展示居中大输入卡片 */
+  hero?: boolean
   /** 数据传输层注入；不传时组件退化为纯 UI（模型列表为空、无法发送） */
   transport?: AIChatTransport
+  /**
+   * @ 提及粒度：reference=内容/表格/公式/图条目（默认，兼容旧宿主）；
+   * document=只到文档级（候选来自权限库内文档标题，选中后整文档圈定检索范围）。
+   */
+  mentionMode?: 'reference' | 'document'
+  /** 知识库单选下拉选项（为空时不渲染下拉，向后兼容） */
+  libraryOptions?: Array<{ value: string; label: string }>
+  /** 当前选中的知识库 id */
+  libraryValue?: string
 }
 
 const props = withDefaults(defineProps<Props>(), {
   defaultModel: '',
-  placeholder: '输入消息，Enter 发送...',
+  placeholder: '输入消息，按Enter发送\n按Shift+Enter换行...',
   contextItems: () => [],
   title: 'AI 助手',
   icon: undefined,
@@ -77,7 +97,11 @@ const props = withDefaults(defineProps<Props>(), {
   scene: 'docs',
   sessionId: 'default',
   libraryId: 'default',
-  transport: undefined
+  hero: false,
+  transport: undefined,
+  mentionMode: 'reference',
+  libraryOptions: () => [],
+  libraryValue: ''
 })
 
 interface ModelOption { value: string; label: string }
@@ -89,6 +113,8 @@ const emit = defineEmits<{
   error: [error: Error]
   answerComplete: [message: AIChatMessage]
   selectCitation: [citation: AIChatCitation]
+  messagesChange: [messages: AIChatMessage[]]
+  'update:libraryValue': [libraryId: string]
 }>()
 
 const sessionIdRef = computed(() => props.sessionId)
@@ -99,12 +125,17 @@ const {
   loading,
   currentStreamContent,
   liveThinkingSteps,
+  systemWarning,
   contextTokens,
   contextRounds,
+  queuedMessages,
   sendMessage,
   stopGeneration,
+  removeQueued,
+  promoteQueued,
   clearMessages,
   startNewChat,
+  loadMessages,
 } = useAIChat({
   defaultModel: props.defaultModel,
   systemPrompt: props.systemPrompt,
@@ -114,6 +145,9 @@ const {
   getContextItems: () => props.contextItems,
   query: props.transport?.query
 })
+
+/** 消息数组任何变化（发送/收到回答/停止/报错）都向上抛出，供宿主做持久化 */
+watch(messages, (value) => { emit('messagesChange', [...value]) }, { deep: true })
 
 const loadingModels = ref(false)
 const models = ref<ModelOption[]>([])
@@ -151,8 +185,10 @@ const handleSend = async (payload: string | BaseChatSendPayload, model: string) 
     : payload
   emit('send', normalizedPayload.content, model)
   try {
-    await sendMessage(normalizedPayload as any, model)
-    const lastAssistantMessage = [...messages.value]
+  const sent = await sendMessage(normalizedPayload as any, model)
+  // 生成期间发送只入队（返回 false）：此时最后一条 assistant 还是上一轮的，不能当作本轮答案上报
+  if (!sent) return
+  const lastAssistantMessage = [...messages.value]
       .reverse()
       .find(item => item.role === 'assistant')
     if (lastAssistantMessage) {
@@ -172,7 +208,8 @@ const searchInlineCitations = async (query: string): Promise<InlineCitationCandi
     library_id: props.libraryId,
     query,
     limit: 10,
-    types: ['content', 'table', 'formula', 'figure']
+    // document 模式：候选只到文档级（后端按标题匹配当前库内文档）
+    types: props.mentionMode === 'document' ? ['document'] : ['content', 'table', 'formula', 'figure']
   }
   const response = await props.transport.searchReferences(payload)
   const items = Array.isArray(response?.items) ? response.items : []
@@ -192,10 +229,15 @@ onMounted(() => { fetchModels() })
 
 defineExpose({
   messages,
+  systemWarning,
+  queuedMessages,
   clearMessages,
   sendMessage,
   handleSend,
   startNewChat,
+  removeQueued,
+  promoteQueued,
+  loadSession: loadMessages,
   clearComposer: () => baseChatRef.value?.clearComposer?.()
 })
 </script>

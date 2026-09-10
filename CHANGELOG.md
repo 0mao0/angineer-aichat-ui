@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.8
+
+- feat: 生成期间可继续输入与发送——发送即入队（上限 10 条），当前回答结束后按序自动发出；每条可「编辑」（取回输入框、连 @ 引用一并带回，改完再发）、「插队」（打断当前生成并立即处理该条，原会话上下文完整沿用）、「删除」；生成中按「停止」= 当前回答停止 + 队列暂停保留，手动再发即恢复推进。队列内核在 `useAIChat`（不含 UI 依赖），组件层面新增 `queuedMessages` prop 与 `removeQueued`/`promoteQueued` 事件
+- feat: 知识库下拉从工具条中央移到输入框左侧（`@` 之后），并在「对话起步」（存在非 system 消息）后锁定，锁定态 hover 提示换库请点新建对话；空会话仍可自由换库
+- feat: 工具条自适应——两个下拉可收缩（库 96–160px / 模型 100–180px，≤480px 再收缩一档），`@` 与发送按钮永不参与收缩，被压缩的是下拉文字（已 ellipsis）
+- fix: 去除 `package.json` 的 UTF-8 BOM（0.1.7 带入）——registry 安装时 pnpm 容忍，但以 `file:`/目录方式引用本包（vendored）会以 `Unexpected token '' … is not valid JSON` 直接解析失败
+- refactor: 删除输入区失效的图片上传入口整条链路（-117 行）——该按钮只把图片读成 DataURL 做本地预览，不上传也不随消息发送，宿主侧早已硬编码禁用；连带移除公开 prop `allowImageUpload`（自始至终未实现过任何能力，传与不传行为一致）
+- style: 待发送托盘重做——原底色 `--bg-tertiary` 在浅色主题下与输入框 `--bg-secondary` 数值相同（≈#fafafa），整块只剩一根几乎不可见的边框；改 primary 淡染 + 同色描边，圆角与输入框统一 12px，新增标题行「待发送 N 条」，序号改圆形徽标，动作区独立成组并换掉 antd text 按钮的裸文字观感，全部颜色仍走 `--chat-queue-*` 双回退钩子
+
 ## 0.1.7
 
 - feat: npm registry 正式上架（@angineer/aichat-ui）

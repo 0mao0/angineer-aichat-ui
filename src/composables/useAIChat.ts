@@ -9,12 +9,16 @@ import type {
   BaseChatSendPayload,
   QueryRequest,
   QueryResponse,
+  QueuedMessage,
   SessionKey,
   SessionSnapshot,
   AIChatContextConfig,
   ThinkingTraceStep,
 } from '../types/chat'
 import { generateMessageId, estimateTokens } from '../utils/tree'
+
+/** 待发送队列上限（UI 层用同一常量做「已满」提示） */
+export const QUEUE_LIMIT = 10
 
 /** 根据 scene 和 id 构建会话池 key */
 export function buildSessionKey(scene: string, id: string): SessionKey {
@@ -162,6 +166,7 @@ export function useAIChat(options?: {
       onDelta?: (delta: string) => void
       onThinking?: (steps: ThinkingTraceStep[]) => void
       onAnswerReplace?: (full: string) => void
+      onWarning?: (message: string) => void
     }
   ) => Promise<QueryResponse>
 }): {
@@ -169,15 +174,24 @@ export function useAIChat(options?: {
   loading: Ref<boolean>
   currentStreamContent: Ref<string>
   liveThinkingSteps: Ref<ThinkingTraceStep[]>
+  systemWarning: Ref<string>
   currentSessionKey: Ref<SessionKey>
   contextTokens: ComputedRef<number>
   contextRounds: ComputedRef<number>
-  sendMessage: (payload: string | BaseChatSendPayload, model?: string, onChunk?: (chunk: string) => void, sendOptions?: { includeDebug?: boolean; includeRetrieved?: boolean }) => Promise<void>
+  /** 待发送队列（生成期间发送的消息） */
+  queuedMessages: Ref<QueuedMessage[]>
+  /** 真正跑完一次 run 返回 true；生成期间入队返回 false */
+  sendMessage: (payload: string | BaseChatSendPayload, model?: string, onChunk?: (chunk: string) => void, sendOptions?: { includeDebug?: boolean; includeRetrieved?: boolean }) => Promise<boolean>
   stopGeneration: () => void
+  /** 删除一条待发送消息 */
+  removeQueued: (id: string) => void
+  /** 插队：提到队首并打断当前 run */
+  promoteQueued: (id: string) => void
   clearMessages: () => void
   switchSession: (newScene: string, newId: string) => void
   removeCurrentSession: () => void
   startNewChat: () => void
+  loadMessages: (newMessages: AIChatMessage[]) => void
 } {
   const contextConfig: AIChatContextConfig = {
     ...DEFAULT_CONTEXT_CONFIG,
@@ -194,7 +208,12 @@ export function useAIChat(options?: {
   const loading = ref(false)
   const currentStreamContent = ref('')
   const liveThinkingSteps = ref<ThinkingTraceStep[]>([])
+  const systemWarning = ref('')
   const abortController = ref<AbortController | null>(null)
+  const queuedMessages = ref<QueuedMessage[]>([])
+  const queuePaused = ref(false)
+  /** 本次中断的起因：stop = 用户手动停止（留失败标记）；promote = 插队接话（不留） */
+  const abortReason = ref<'stop' | 'promote' | null>(null)
 
   if (options?.systemPrompt) {
     messages.value.push({
@@ -230,6 +249,8 @@ export function useAIChat(options?: {
   /** 切换到指定 scene:id 的会话，自动保存当前会话并恢复目标会话 */
   function switchSession(newScene: string, newId: string): void {
     saveToPool()
+    queuedMessages.value = []
+    queuePaused.value = false
     const newKey = buildSessionKey(newScene, newId)
     currentSessionKey.value = newKey
     if (!restoreFromPool(newKey)) {
@@ -247,6 +268,8 @@ export function useAIChat(options?: {
   /** 删除当前会话并清空本地状态 */
   function removeCurrentSession(): void {
     sessionPool.delete(currentSessionKey.value)
+    queuedMessages.value = []
+    queuePaused.value = false
     messages.value = []
     if (options?.systemPrompt) {
       messages.value.push({
@@ -260,6 +283,8 @@ export function useAIChat(options?: {
   /** 新建对话：清空当前消息、中止生成，并切换到全新会话 key（后端按 key 开新会话） */
   function startNewChat(): void {
     stopGeneration()
+    queuedMessages.value = []
+    queuePaused.value = false
     sessionPool.delete(currentSessionKey.value)
     const newId = `chat-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
     currentSessionKey.value = buildSessionKey(scene, newId)
@@ -279,7 +304,7 @@ export function useAIChat(options?: {
     _model?: string,
     onChunk?: (chunk: string) => void,
     _sendOptions?: { includeDebug?: boolean; includeRetrieved?: boolean }
-  ): Promise<void> => {
+  ): Promise<boolean> => {
     const normalizedPayload: BaseChatSendPayload = typeof payload === 'string'
       ? { content: payload, citations: [] }
       : {
@@ -289,7 +314,20 @@ export function useAIChat(options?: {
     const normalizedContent = normalizedPayload.content.trim()
     const inlineCitations = normalizedPayload.citations
 
-    if (!normalizedContent || loading.value) return
+    if (!normalizedContent) return false
+
+    // 生成期间发送 = 入队，当前 run 收尾后由 advanceQueue 依次发出
+    if (loading.value) {
+      if (queuedMessages.value.length >= QUEUE_LIMIT) return false
+      queuedMessages.value.push({
+        id: generateMessageId(),
+        content: normalizedContent,
+        citations: inlineCitations
+      })
+      return false
+    }
+
+    queuePaused.value = false // 任何显式发送都解除暂停
 
     const userMessage: AIChatMessage = {
       id: generateMessageId(),
@@ -307,12 +345,17 @@ export function useAIChat(options?: {
     manageContext([...messages.value], contextConfig)
 
     const contextItems = options?.getContextItems?.() || []
+    // @文档 提及（targetType='document'）把整个文档圈进检索范围（后端 ScopeContext.doc_ids）
+    const mentionedDocIds = inlineCitations
+      .filter(binding => String(binding.reference?.targetType || '') === 'document')
+      .map(binding => String(binding.reference?.docId || binding.reference?.targetId || ''))
+      .filter(Boolean)
     const queryRequest: QueryRequest = {
       query: userMessage.content,
       scene,
       session_id: currentSessionKey.value,
       library_id: String(unref(options?.libraryId) || 'default'),
-      doc_ids: contextItems.map(item => item.id),
+      doc_ids: [...new Set([...contextItems.map(item => item.id), ...mentionedDocIds])],
       inline_citations: inlineCitations,
     }
 
@@ -337,6 +380,9 @@ export function useAIChat(options?: {
           // 边界规则替换最终答案时整体覆盖，避免旧答案残留在界面上
           streamed = true
           currentStreamContent.value = full
+        },
+        onWarning: (msg) => {
+          systemWarning.value = msg
         },
       })
       const payload = mapQueryResponseToChatResponse(queryData)
@@ -395,7 +441,11 @@ export function useAIChat(options?: {
           messages.value.push({
             id: generateMessageId(),
             role: 'assistant',
-            content: currentStreamContent.value + '\n\n[已停止生成]',
+            // 插队是用户主动接话，被截断的回答按普通消息落库；
+            // 手动停止仍标注，便于回看时知道答案不完整
+            content: abortReason.value === 'promote'
+              ? currentStreamContent.value
+              : currentStreamContent.value + '\n\n[已停止生成]',
             timestamp: Date.now()
           })
         }
@@ -412,12 +462,47 @@ export function useAIChat(options?: {
       loading.value = false
       currentStreamContent.value = ''
       abortController.value = null
+      abortReason.value = null
       saveToPool()
+      // 必须放在上面这些清理动作之后：下一轮 sendMessage 新建的 AbortController
+      // 不能被本轮的 = null 抹掉，否则「停止」会失效
+      advanceQueue()
     }
+    return true
   }
 
-  /** 停止当前流式生成 */
+  /** 队列推进：取出队首发送。只在上一 run 完全收尾后调用（见 sendMessage 的 finally）。 */
+  function advanceQueue(): void {
+    if (queuePaused.value) return
+    const next = queuedMessages.value.shift()
+    if (!next) return
+    void sendMessage({ content: next.content, citations: next.citations })
+  }
+
+  /** 删除一条待发送消息 */
+  const removeQueued = (id: string): void => {
+    const index = queuedMessages.value.findIndex(item => item.id === id)
+    if (index >= 0) queuedMessages.value.splice(index, 1)
+  }
+
+  /** 插队：提到队首 + 打断当前 run，打断后的收尾会立刻发出这一条 */
+  const promoteQueued = (id: string): void => {
+    const index = queuedMessages.value.findIndex(item => item.id === id)
+    if (index < 0) return
+    const [item] = queuedMessages.value.splice(index, 1)
+    queuedMessages.value.unshift(item)
+    const wasLoading = loading.value
+    if (wasLoading) stopGeneration()
+    // 必须在 stopGeneration 之后：stopGeneration 会把 abortReason 置为 'stop'
+    if (wasLoading) abortReason.value = 'promote'
+    queuePaused.value = false // 同上：stopGeneration 会把队列置为暂停
+    if (!wasLoading) advanceQueue()
+  }
+
+  /** 停止当前流式生成：队列一并暂停（保留条目，等用户处置） */
   const stopGeneration = () => {
+    queuePaused.value = true
+    abortReason.value = 'stop'
     if (abortController.value) {
       abortController.value.abort()
     }
@@ -436,6 +521,15 @@ export function useAIChat(options?: {
     saveToPool()
   }
 
+  /** 灌入一组历史消息到当前会话（历史对话恢复用），中止进行中的生成并写回会话池 */
+  const loadMessages = (newMessages: AIChatMessage[]): void => {
+    stopGeneration()
+    queuedMessages.value = []
+    queuePaused.value = false
+    messages.value = [...newMessages]
+    saveToPool()
+  }
+
   const contextTokens = computed(() =>
     messages.value.reduce((sum, m) => sum + estimateTokens(m.content), 0)
   )
@@ -449,14 +543,19 @@ export function useAIChat(options?: {
     loading,
     currentStreamContent,
     liveThinkingSteps,
+    systemWarning,
     currentSessionKey,
     contextTokens,
     contextRounds,
+    queuedMessages,
     sendMessage,
     stopGeneration,
+    removeQueued,
+    promoteQueued,
     clearMessages,
     switchSession,
     removeCurrentSession,
     startNewChat,
+    loadMessages,
   }
 }

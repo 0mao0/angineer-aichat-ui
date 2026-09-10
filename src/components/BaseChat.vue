@@ -1,5 +1,5 @@
 <template>
-  <div class="base-chat-component">
+  <div class="base-chat-component" :class="{ 'base-chat--hero': hero && !displayMessages.length && !loading && !currentStreamContent }">
     <div v-if="title" class="chat-header">
       <span v-if="icon" class="header-icon">
         <component :is="icon" />
@@ -18,6 +18,9 @@
 
     <div class="chat-messages-wrap">
       <div ref="messagesRef" class="chat-messages" @click="handleMessageClick">
+        <div v-if="hero && !displayMessages.length" class="chat-hero">
+          <slot name="hero" />
+        </div>
       <div
         v-for="(msg, index) in displayMessages"
         :key="msg.id || index"
@@ -202,6 +205,45 @@
       <div class="resize-indicator"></div>
     </div>
 
+    <div v-if="queuedMessages.length" class="pending-queue">
+      <div class="queue-head">
+        <span class="queue-title">待发送 {{ queuedMessages.length }} 条</span>
+        <span class="queue-hint">当前回答结束后按序发出</span>
+      </div>
+      <div class="queue-list">
+        <div v-for="(item, idx) in queuedMessages" :key="item.id" class="queue-item">
+          <span class="queue-index">{{ idx + 1 }}</span>
+          <span class="queue-text" :title="item.content">{{ item.content }}</span>
+          <span class="queue-actions">
+            <button
+              type="button"
+              class="queue-action queue-icon-btn"
+              title="编辑：取回输入框（含引用），改完再发"
+              @click="handleEditQueued(item)"
+            >
+              <EditOutlined />
+            </button>
+            <button
+              type="button"
+              class="queue-action queue-jump"
+              title="插队：打断当前生成并立即发送这条"
+              @click="emit('promoteQueued', item.id)"
+            >
+              插队
+            </button>
+            <button
+              type="button"
+              class="queue-action queue-icon-btn queue-remove"
+              title="删除这条待发送消息"
+              @click="emit('removeQueued', item.id)"
+            >
+              <CloseOutlined />
+            </button>
+          </span>
+        </div>
+      </div>
+    </div>
+
     <div ref="chatInputRef" class="chat-input" :style="{ height: `${inputHeight}px` }">
       <div v-if="contextItems.length" class="context-hint">
         <a-tag
@@ -214,23 +256,11 @@
         </a-tag>
       </div>
 
-      <div v-if="pendingImages.length" class="image-preview">
-        <div
-          v-for="(img, idx) in pendingImages"
-          :key="idx"
-          class="preview-item"
-        >
-          <img :src="img" alt="预览" />
-          <CloseCircleOutlined class="remove-btn" @click="removeImage(idx)" />
-        </div>
-      </div>
-
       <div class="input-wrapper">
         <InlineCitationEditor
           ref="inlineCitationEditorRef"
           v-model="composerValue"
           :placeholder="placeholder"
-          :disabled="loading"
           :search-citations="searchCitations"
           @submit="handleSend"
           @select-citation="handleInlineCitationSelect"
@@ -243,27 +273,20 @@
               size="small"
               class="mention-trigger-btn"
               :disabled="loading"
-              title="插入引用 @"
+              :title="mentionLabel"
               @click="handleInsertMentionTrigger"
             >
               @
             </a-button>
-            <a-button
-              type="text"
+            <a-select
+              v-if="libraryOptions.length"
+              class="library-select"
               size="small"
-              :disabled="loading || !allowImageUpload"
-              :title="allowImageUpload ? '上传图片（开发中）' : '图片上传不可用'"
-              @click="handleImageUpload"
-            >
-              <template #icon><PictureOutlined /></template>
-            </a-button>
-            <input
-              ref="imageInputRef"
-              type="file"
-              accept="image/*"
-              multiple
-              style="display: none"
-              @change="onImageSelected"
+              :value="libraryValue || undefined"
+              :disabled="loading || conversationStarted"
+              :options="libraryOptions"
+              :title="libraryTitle"
+              @change="(value: string) => emit('update:libraryValue', value)"
             />
           </div>
 
@@ -297,18 +320,17 @@
               danger
               size="small"
               class="icon-btn"
-              title="停止生成"
+              title="停止生成（待发送队列会暂停保留）"
               @click="handleStop"
             >
               <PauseCircleOutlined />
             </a-button>
             <a-button
-              v-else
               type="primary"
               size="small"
               class="icon-btn"
-              :disabled="!composerValue.content.trim() && !pendingImages.length"
-              title="发送消息 (Enter)"
+              :disabled="!composerValue.content.trim()"
+              :title="loading ? '加入待发送队列 (Enter)' : '发送消息 (Enter)'"
               @click="handleSend"
             >
               <SendOutlined />
@@ -330,8 +352,8 @@ import {
   ClearOutlined,
   SendOutlined,
   PauseCircleOutlined,
-  PictureOutlined,
-  CloseCircleOutlined,
+  CloseOutlined,
+  EditOutlined,
   InfoCircleOutlined,
   BulbOutlined,
   DownOutlined,
@@ -348,7 +370,8 @@ import type {
   BaseChatSendPayload,
   CitationBinding,
   InlineCitationCandidate,
-  ThinkingTraceStep
+  ThinkingTraceStep,
+  QueuedMessage
 } from '../types'
 import {
   buildInlineCitationTagHtml,
@@ -364,6 +387,8 @@ import {
   sumThinkingDuration,
 } from '../utils/thinking'
 import { formatTokenCount } from '../utils/token'
+import { message } from 'ant-design-vue'
+import { QUEUE_LIMIT } from '../composables/useAIChat'
 
 interface Props {
   messages: BaseChatMessage[]
@@ -382,8 +407,17 @@ interface Props {
   contextRounds?: number
   streamingThinkingSteps?: ThinkingTraceStep[]
   renderMessage?: (content: string) => string
-  allowImageUpload?: boolean
   searchCitations?: (query: string) => Promise<InlineCitationCandidate[]>
+  /** Hero 模式：无消息时整体垂直居中、输入卡片浮起居中（对话入口态） */
+  hero?: boolean
+  /** @ 按钮提示文案（宿主按提及粒度定制，如“提及文档 @”） */
+  mentionLabel?: string
+  /** 知识库单选下拉选项（为空时不渲染，向后兼容） */
+  libraryOptions?: Array<{ value: string; label: string }>
+  /** 当前选中的知识库 id */
+  libraryValue?: string
+  /** 生成期间排队的待发送消息 */
+  queuedMessages?: QueuedMessage[]
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -391,7 +425,7 @@ const props = withDefaults(defineProps<Props>(), {
   models: () => [],
   loadingModels: false,
   defaultModel: '',
-  placeholder: '输入消息，Enter 发送...',
+  placeholder: '输入消息，按Enter发送\n按Shift+Enter换行...',
   contextItems: () => [],
   title: 'AI 助手',
   icon: undefined,
@@ -401,8 +435,12 @@ const props = withDefaults(defineProps<Props>(), {
   contextRounds: 0,
   streamingThinkingSteps: () => [],
   renderMessage: undefined,
-  allowImageUpload: true,
-  searchCitations: undefined
+  searchCitations: undefined,
+  hero: false,
+  mentionLabel: '插入引用 @',
+  libraryOptions: () => [],
+  libraryValue: '',
+  queuedMessages: () => []
 })
 
 const emit = defineEmits<{
@@ -413,14 +451,25 @@ const emit = defineEmits<{
   removeContext: [id: string]
   modelChange: [model: string]
   selectCitation: [citation: BaseChatCitation]
+  'update:libraryValue': [libraryId: string]
+  /** 删除一条待发送消息 */
+  removeQueued: [id: string]
+  /** 插队：打断当前生成并立即发送该条 */
+  promoteQueued: [id: string]
 }>()
 
 const messagesRef = ref<HTMLElement | null>(null)
 const chatInputRef = ref<HTMLElement | null>(null)
-const imageInputRef = ref<HTMLInputElement | null>(null)
 const inlineCitationEditorRef = ref<InstanceType<typeof InlineCitationEditor> | null>(null)
 const composerValue = ref<BaseChatSendPayload>({ content: '', citations: [] })
-const pendingImages = ref<string[]>([])
+/** 对话「起步」判定：存在非 system 消息即锁库（空会话可自由换库） */
+const conversationStarted = computed(() => props.messages.some(m => m.role !== 'system'))
+const lockedLibraryLabel = computed(
+  () => props.libraryOptions.find(option => option.value === props.libraryValue)?.label || ''
+)
+const libraryTitle = computed(() => conversationStarted.value
+  ? `本对话已锁定知识库${lockedLibraryLabel.value ? ` ${lockedLibraryLabel.value}` : ''}，换库请点新建对话`
+  : '选择知识库（单选）')
 const selectedModel = ref(props.defaultModel)
 const inputHeight = ref(150)
 const isResizing = ref(false)
@@ -853,7 +902,11 @@ const handleSend = () => {
     citations: Array.isArray(composerValue.value.citations) ? composerValue.value.citations : []
   }
   const content = payload.content
-  if (!content && !pendingImages.value.length) {
+  if (!content) {
+    return
+  }
+  if (props.loading && props.queuedMessages.length >= QUEUE_LIMIT) {
+    message.warning(`待发送队列已满（上限 ${QUEUE_LIMIT} 条）`)
     return
   }
 
@@ -867,7 +920,6 @@ const handleSend = () => {
  */
 const resetComposer = () => {
   composerValue.value = { content: '', citations: [] }
-  pendingImages.value = []
 }
 
 const handleInlineCitationSelect = (binding: CitationBinding) => {
@@ -903,17 +955,6 @@ const onModelChange = (model: string) => {
   emit('modelChange', model)
 }
 
-/**
- * 打开隐藏的图片选择框。
- */
-const handleImageUpload = () => {
-  if (!props.allowImageUpload) {
-    return
-  }
-
-  imageInputRef.value?.click()
-}
-
 const handleInsertMentionTrigger = async () => {
   if (props.loading) {
     return
@@ -922,33 +963,28 @@ const handleInsertMentionTrigger = async () => {
 }
 
 /**
- * 读取图片为预览数据，供后续多模态能力接入。
+ * 编辑队列中的一条：取回输入框（含 @ 引用），并从队列移除，改完由用户再发。
+ * 输入框已有草稿时不覆盖——改为另起一行追加，引用区间按追加位置整体偏移，
+ * 两者都不丢（引用区间是 content 字符串里的偏移量，不偏移会错位）。
  */
-const onImageSelected = (event: Event) => {
-  const target = event.target as HTMLInputElement
-  const files = target.files
-  if (!files) {
-    return
+const handleEditQueued = (item: QueuedMessage) => {
+  const current = composerValue.value
+  const draft = current.content
+  const hasDraft = draft.trim().length > 0
+  const offset = hasDraft ? draft.length + 1 : 0
+  const recalled = Array.isArray(item.citations) ? item.citations : []
+  composerValue.value = {
+    content: hasDraft ? `${draft}\n${item.content}` : item.content,
+    citations: [
+      ...(Array.isArray(current.citations) ? current.citations : []),
+      ...recalled.map(binding => ({
+        ...binding,
+        range: { start: binding.range.start + offset, end: binding.range.end + offset }
+      }))
+    ]
   }
-
-  Array.from(files).forEach(file => {
-    const reader = new FileReader()
-    reader.onload = loadEvent => {
-      if (loadEvent.target?.result) {
-        pendingImages.value.push(loadEvent.target.result as string)
-      }
-    }
-    reader.readAsDataURL(file)
-  })
-
-  target.value = ''
-}
-
-/**
- * 移除待发送图片预览项。
- */
-const removeImage = (index: number) => {
-  pendingImages.value.splice(index, 1)
+  emit('removeQueued', item.id)
+  nextTick(() => inlineCitationEditorRef.value?.focusEditor())
 }
 
 /**
@@ -1711,6 +1747,127 @@ defineExpose({
   }
 }
 
+/* 待发送托盘：浅色主题下 --bg-tertiary(≈#fafafa) 与输入框 --bg-secondary(#fafafa) 数值相同，
+   用它做底色等于没有底色（只剩一根几乎看不见的边框）。改为 primary 淡染 + 同色描边，
+   两种主题下都是明确独立的一块，语义上也贴合「排队中」。圆角与输入框统一为 12px。 */
+.pending-queue {
+  margin: 0 16px 8px;
+  padding: 8px 12px 4px;
+  border: 1px solid var(--chat-queue-border, rgba(24, 144, 255, 0.22));
+  border-radius: 12px;
+  background: var(--chat-queue-bg, rgba(24, 144, 255, 0.06));
+  display: flex;
+  flex-direction: column;
+
+  .queue-head {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    padding-bottom: 4px;
+
+    .queue-title {
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--chat-queue-title, var(--primary-color, #1890ff));
+    }
+
+    .queue-hint {
+      font-size: 11px;
+      color: var(--text-tertiary, rgba(0, 0, 0, 0.45));
+    }
+  }
+
+  .queue-list {
+    display: flex;
+    flex-direction: column;
+    max-height: 116px;
+    overflow-y: auto;
+  }
+
+  .queue-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    padding: 5px 4px;
+    border-radius: 6px;
+    transition: background 0.15s;
+
+    & + .queue-item {
+      border-top: 1px solid var(--chat-queue-divider, rgba(24, 144, 255, 0.12));
+    }
+
+    &:hover {
+      background: var(--chat-queue-item-hover, rgba(24, 144, 255, 0.08));
+    }
+
+    .queue-index {
+      flex-shrink: 0;
+      width: 18px;
+      height: 18px;
+      line-height: 18px;
+      text-align: center;
+      font-size: 11px;
+      border-radius: 50%;
+      color: var(--primary-color, #1890ff);
+      background: var(--chat-queue-index-bg, rgba(24, 144, 255, 0.14));
+    }
+
+    .queue-text {
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 13px;
+      color: var(--text-primary, rgba(0, 0, 0, 0.85));
+    }
+
+    /* 原生 button：antd 的 text 按钮在静息态零边界，挤在行尾像裸文字；
+       这里给动作区自己的可见形状，并保证正文与按钮之间至少 12px 间距（正文是 flex:1 会顶过来） */
+    .queue-action {
+      flex-shrink: 0;
+      height: 22px;
+      padding: 0 8px;
+      font-size: 12px;
+      line-height: 20px;
+      border: 1px solid transparent;
+      border-radius: 6px;
+      background: transparent;
+      color: var(--text-secondary, rgba(0, 0, 0, 0.65));
+      cursor: pointer;
+      transition: color 0.15s, background 0.15s;
+
+      &:hover {
+        color: var(--primary-color, #1890ff);
+        background: var(--chat-queue-action-hover, rgba(24, 144, 255, 0.12));
+      }
+    }
+
+    /* 动作区独立成组：与正文拉开 12px（正文是 flex:1 会顶过来），组内再收紧到 2px */
+    .queue-actions {
+      flex-shrink: 0;
+      display: inline-flex;
+      align-items: center;
+      gap: 2px;
+      margin-left: 4px;
+    }
+
+    .queue-icon-btn {
+      width: 22px;
+      padding: 0;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .queue-remove:hover {
+      color: var(--chat-queue-remove-hover-color, #ff4d4f);
+      background: var(--chat-queue-remove-hover, rgba(255, 77, 79, 0.12));
+    }
+  }
+}
+
 .chat-input {
   flex-shrink: 0;
   padding: 12px 16px;
@@ -1727,44 +1884,6 @@ defineExpose({
     display: flex;
     flex-wrap: wrap;
     gap: 6px;
-  }
-
-  .image-preview {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-    margin-bottom: 8px;
-    padding: 8px;
-    background: var(--bg-tertiary);
-    border-radius: 8px;
-
-    .preview-item {
-      position: relative;
-      width: 80px;
-      height: 80px;
-
-      img {
-        width: 100%;
-        height: 100%;
-        object-fit: cover;
-        border-radius: 6px;
-      }
-
-      .remove-btn {
-        position: absolute;
-        top: -6px;
-        right: -6px;
-        font-size: 16px;
-          color: var(--chat-error-color, #ff4d4f);
-          background: var(--bg-secondary, #fafafa);
-        border-radius: 50%;
-        cursor: pointer;
-
-        &:hover {
-            color: var(--chat-error-hover, #ff7875);
-        }
-      }
-    }
   }
 
   .input-wrapper {
@@ -1789,7 +1908,7 @@ defineExpose({
       overflow-y: auto;
 
       &::placeholder {
-        color: var(--text-secondary);
+        color: var(--text-tertiary, #999);
       }
 
       &:focus {
@@ -1817,8 +1936,10 @@ defineExpose({
 
     .left-actions {
       display: flex;
+      align-items: center;
       gap: 2px;
       flex-shrink: 0;
+      min-width: 0;
 
       .mention-trigger-btn {
         color: rgba(255, 255, 255, 0.7);
@@ -1828,17 +1949,47 @@ defineExpose({
           color: rgba(255, 255, 255, 0.88);
         }
       }
+
+      .library-select {
+        width: auto;
+        max-width: 160px;
+        min-width: 96px;
+        flex-shrink: 1;
+
+        :deep(.ant-select-selector) {
+          font-size: 12px;
+          border-radius: 6px;
+          background: var(--bg-secondary, #fafafa);
+          color: var(--text-primary);
+          border-color: var(--border-color);
+        }
+
+        :deep(.ant-select-selection-item) {
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+          color: var(--text-primary);
+        }
+
+        :deep(.ant-select-arrow) {
+          color: var(--text-secondary);
+        }
+      }
     }
 
     .center-actions {
       flex: 1;
       min-width: 0;
       display: flex;
+      align-items: center;
       justify-content: flex-end;
+      gap: 8px;
 
       .model-select {
-        width: 100%;
+        width: auto;
         max-width: 180px;
+        min-width: 100px;
+        flex-shrink: 1;
 
         :deep(.ant-select-selector) {
           font-size: 12px;
@@ -1903,6 +2054,49 @@ defineExpose({
           font-size: 14px;
         }
       }
+    }
+  }
+}
+
+/* ===== Hero 模式（对话入口态）===== */
+.base-chat--hero {
+  justify-content: center;
+
+  .chat-messages-wrap {
+    flex: 0 0 auto;
+    overflow: visible;
+  }
+
+  .resize-handle {
+    display: none;
+  }
+
+  .chat-input {
+    /* 入口态不再包外层底板：编辑器自身已有描边/圆角，底板只是大一圈的冗余层 */
+    width: min(820px, 92%);
+    margin: 0 auto 24px;
+    border: none;
+    background: transparent;
+    box-shadow: none;
+  }
+}
+
+.chat-hero {
+  text-align: center;
+  padding: 24px 16px 8px;
+}
+
+/* 窄屏：两个下拉一起收缩，保证 @ 与发送按钮永不被挤出（挤的是下拉文字，已 ellipsis） */
+@media (max-width: 480px) {
+  .chat-input .input-actions {
+    .left-actions .library-select {
+      max-width: 120px;
+      min-width: 72px;
+    }
+
+    .center-actions .model-select {
+      max-width: 128px;
+      min-width: 80px;
     }
   }
 }
