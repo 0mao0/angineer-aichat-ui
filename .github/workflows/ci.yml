@@ -10,6 +10,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: package.json 无 BOM 断言
+        run: |
+          # 发版手工改版本号若用了会写 BOM 的工具（如 PowerShell 5.1 的 Set-Content/Out-File），
+          # package.json 会以 EF BB BF 开头：registry 安装时 pnpm 容忍，
+          # 但以 file:/目录（vendored）方式引用本包会以 Unexpected token 直接解析失败。
+          bytes=$(head -c 3 package.json | od -An -tx1 | tr -d ' \n')
+          if [ "$bytes" = "efbbbf" ]; then
+            echo "::error file=package.json::package.json 带 UTF-8 BOM（EF BB BF），请用无 BOM 工具（Node 等）重写后重推"
+            exit 1
+          fi
+          echo "package.json 无 BOM"
       - uses: pnpm/action-setup@v4
         with:
           version: 9
