@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.9
+
+- perf: package.json 声明 `sideEffects` 仅样式文件（`**/*.css` / `**/*.less` / `**/styles/**`）——组件模块可被消费方 bundler tree-shake，此前未声明时打包器保守保留整个库及其重依赖（katex / pdfjs / xlsx 等），monorepo 同批实测消费方关键路径 −895KB
+- ci: package.json 无 BOM 断言（发版改版本号时容易带入 BOM，vendored 引用会解析失败）
+
 ## 0.1.8
 
 - feat: 生成期间可继续输入与发送——发送即入队（上限 10 条），当前回答结束后按序自动发出；每条可「编辑」（取回输入框、连 @ 引用一并带回，改完再发）、「插队」（打断当前生成并立即处理该条，原会话上下文完整沿用）、「删除」；生成中按「停止」= 当前回答停止 + 队列暂停保留，手动再发即恢复推进。队列内核在 `useAIChat`（不含 UI 依赖），组件层面新增 `queuedMessages` prop 与 `removeQueued`/`promoteQueued` 事件
