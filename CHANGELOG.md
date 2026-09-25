@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.0
+
+- feat: 等待体验三件套——① 中间答案折叠留痕：新回调 `onInterimAnswer`，turn_start/边界规则改写/run_end 权威覆盖发生真实替换时，被顶替的正文快照收进置灰折叠块（流式区+最终气泡两处可展开回看），不再直接蒸发；② 分段进度：新回调 `onStage`（run_start→classify / tool_start→search / 首 delta→generate），`progressStage` + `elapsedSeconds`，等待文案从全程「思考中...」改为「意图理解…→检索规范库…（实时秒数）→生成回答…」；③ 流式重渲节流：onDelta 50ms 合帧写 currentStreamContent（改前每 delta 全量重解析 markdown，长答案 O(n²) 越打越卡）
+- feat: `onError` 回调——宿主可据 403 `login_required` 等业务码弹登录浮层；未挂回调时错误气泡展示干净业务文案（不带「出错了」前缀）
+- feat: `BaseChatMessage` / `AIChatMessage` 新增 `interim_answers` 字段（历史气泡回看被替换的中间答案）
+- fix: 发给后端的 `session_id` 改发裸 id（剥掉池 key 的 `scene:` 前缀）——此前落库在 `docs:chat-x` 而宿主记录层打裸 id，快照补丁 400 unknown msg_seq 静默丢失、会话列表同会话双 id（服务端池 key 本就含 scene，行为不变；存量带前缀行保留仍可用）
+- fix: 输入区 @ 按钮与答案角标去硬编码深色（light 模式白字隐形/浅底近黑圆喧宾夺主，v0.0.51 深色时代遗留），三轮迭代定案中性灰双主题：新 token 三件套 `--chat-citation-circle-{bg,border,text}`（light 浅灰圆面+中灰数字、dark 深灰圆+浅灰数字），hover 主色+白字不变
+- test: useAIChat 用例断言裸 session_id 与跟进式改写相关契约
+
 ## 0.1.9
 
 - perf: package.json 声明 `sideEffects` 仅样式文件（`**/*.css` / `**/*.less` / `**/styles/**`）——组件模块可被消费方 bundler tree-shake，此前未声明时打包器保守保留整个库及其重依赖（katex / pdfjs / xlsx 等），monorepo 同批实测消费方关键路径 −895KB
