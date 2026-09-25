@@ -167,8 +167,14 @@ export function useAIChat(options?: {
       onThinking?: (steps: ThinkingTraceStep[]) => void
       onAnswerReplace?: (full: string) => void
       onWarning?: (message: string) => void
+      /** 中间轮正文快照（被拒答重答/截断重试顶替的旧输出），收进思考折叠区而非丢弃 */
+      onInterimAnswer?: (snapshot: string) => void
+      /** 等待期阶段：classify（意图理解）→ search（检索）→ generate（生成） */
+      onStage?: (stage: 'classify' | 'search' | 'generate') => void
     }
   ) => Promise<QueryResponse>
+  /** 发送/流式过程中的错误回调（含 403 login_required 等业务态）；宿主据此弹登录浮层等 */
+  onError?: (error: Error) => void
 }): {
   messages: Ref<AIChatMessage[]>
   loading: Ref<boolean>
@@ -178,6 +184,12 @@ export function useAIChat(options?: {
   currentSessionKey: Ref<SessionKey>
   contextTokens: ComputedRef<number>
   contextRounds: ComputedRef<number>
+  /** 中间轮被顶替的正文快照（本 run 内有效，run 结束清空） */
+  interimAnswers: Ref<string[]>
+  /** 等待期阶段（classify/search/generate），驱动分段进度文案 */
+  progressStage: Ref<string>
+  /** 当前阶段已持续的秒数（每 500ms 刷新） */
+  elapsedSeconds: Ref<number>
   /** 待发送队列（生成期间发送的消息） */
   queuedMessages: Ref<QueuedMessage[]>
   /** 真正跑完一次 run 返回 true；生成期间入队返回 false */
@@ -190,7 +202,7 @@ export function useAIChat(options?: {
   clearMessages: () => void
   switchSession: (newScene: string, newId: string) => void
   removeCurrentSession: () => void
-  startNewChat: () => void
+  startNewChat: (explicitId?: string) => void
   loadMessages: (newMessages: AIChatMessage[]) => void
 } {
   const contextConfig: AIChatContextConfig = {
@@ -214,6 +226,33 @@ export function useAIChat(options?: {
   const queuePaused = ref(false)
   /** 本次中断的起因：stop = 用户手动停止（留失败标记）；promote = 插队接话（不留） */
   const abortReason = ref<'stop' | 'promote' | null>(null)
+  const interimAnswers = ref<string[]>([])
+  const progressStage = ref('')
+  const elapsedSeconds = ref(0)
+  /** delta 合帧缓冲：流式期间每个分片都触发 currentStreamContent 变更会让
+   *  渲染层全量重解析 markdown（O(n²)），50ms 合帧把重渲次数压到每秒 ~20 次 */
+  let deltaBuffer = ''
+  let deltaFlushTimer: ReturnType<typeof setTimeout> | null = null
+  let stageTimer: ReturnType<typeof setInterval> | null = null
+  let stageStartAt = 0
+
+  const flushDeltaBuffer = () => {
+    if (!deltaBuffer) return
+    currentStreamContent.value += deltaBuffer
+    deltaBuffer = ''
+  }
+
+  const resetRunTimers = () => {
+    if (deltaFlushTimer) {
+      clearTimeout(deltaFlushTimer)
+      deltaFlushTimer = null
+    }
+    deltaBuffer = ''
+    if (stageTimer) {
+      clearInterval(stageTimer)
+      stageTimer = null
+    }
+  }
 
   if (options?.systemPrompt) {
     messages.value.push({
@@ -280,13 +319,14 @@ export function useAIChat(options?: {
     }
   }
 
-  /** 新建对话：清空当前消息、中止生成，并切换到全新会话 key（后端按 key 开新会话） */
-  function startNewChat(): void {
+  /** 新建对话：清空当前消息、中止生成，并切换到全新会话 key（后端按 key 开新会话）。
+   * 传入 explicitId 时由宿主指定新会话 id（宿主侧持久化活跃 id 的单一生成点）。 */
+  function startNewChat(explicitId?: string): void {
     stopGeneration()
     queuedMessages.value = []
     queuePaused.value = false
     sessionPool.delete(currentSessionKey.value)
-    const newId = `chat-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
+    const newId = explicitId || `chat-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
     currentSessionKey.value = buildSessionKey(scene, newId)
     messages.value = []
     if (options?.systemPrompt) {
@@ -341,6 +381,13 @@ export function useAIChat(options?: {
     loading.value = true
     currentStreamContent.value = ''
     liveThinkingSteps.value = []
+    interimAnswers.value = []
+    progressStage.value = ''
+    elapsedSeconds.value = 0
+    stageStartAt = Date.now()
+    stageTimer = setInterval(() => {
+      elapsedSeconds.value = Math.floor((Date.now() - stageStartAt) / 1000)
+    }, 500)
 
     manageContext([...messages.value], contextConfig)
 
@@ -353,7 +400,11 @@ export function useAIChat(options?: {
     const queryRequest: QueryRequest = {
       query: userMessage.content,
       scene,
-      session_id: currentSessionKey.value,
+      // 发裸 id（剥掉池 key 的 `${scene}:` 前缀）：服务端池 key 本就含 scene，
+      // 历史落库/快照 PUT/会话列表都以 session_id 为键，必须与宿主侧 record.id 一致——
+      // 此前发带前缀的池 key，落库在 docs:chat-x 而 PUT 打 chat-x，400 unknown msg_seq
+      // 且列表出现同会话双 id（2026-09-25 排查定位）
+      session_id: currentSessionKey.value.slice(buildSessionKey(scene, '').length),
       library_id: String(unref(options?.libraryId) || 'default'),
       doc_ids: [...new Set([...contextItems.map(item => item.id), ...mentionedDocIds])],
       inline_citations: inlineCitations,
@@ -370,21 +421,48 @@ export function useAIChat(options?: {
         signal: abortController.value.signal,
         onDelta: (delta) => {
           streamed = true
-          currentStreamContent.value += delta
+          deltaBuffer += delta
           onChunk?.(delta)
+          if (!deltaFlushTimer) {
+            deltaFlushTimer = setTimeout(() => {
+              deltaFlushTimer = null
+              flushDeltaBuffer()
+            }, 50)
+          }
         },
         onThinking: (steps) => {
           liveThinkingSteps.value = steps
         },
         onAnswerReplace: (full) => {
-          // 边界规则替换最终答案时整体覆盖，避免旧答案残留在界面上
+          // 边界规则替换最终答案时整体覆盖，避免旧答案残留在界面上；
+          // 合帧缓冲必须一并丢弃，否则旧 delta 会拼回被替换的新答案后面
           streamed = true
+          deltaBuffer = ''
           currentStreamContent.value = full
+        },
+        onInterimAnswer: (snapshot) => {
+          if (snapshot) interimAnswers.value = [...interimAnswers.value, snapshot]
+        },
+        onStage: (stage) => {
+          progressStage.value = stage
+          stageStartAt = Date.now()
+          elapsedSeconds.value = 0
         },
         onWarning: (msg) => {
           systemWarning.value = msg
         },
       })
+      // 服务端落库 seq（chat_history D10）：user 取首、assistant 取尾，
+      // 宿主据此回写展示字段快照（citations / thinking_trace 等）
+      if (deltaFlushTimer) {
+        clearTimeout(deltaFlushTimer)
+        deltaFlushTimer = null
+      }
+      flushDeltaBuffer()
+      const msgSeqs = Array.isArray(queryData.msg_seqs) ? queryData.msg_seqs : []
+      if (msgSeqs.length) {
+        userMessage.msgSeq = msgSeqs[0]
+      }
       const payload = mapQueryResponseToChatResponse(queryData)
       const citations = dedupeCitations(payload.citations || [])
       let assistantContent = payload.answer || ''
@@ -408,6 +486,7 @@ export function useAIChat(options?: {
         role: 'assistant',
         content: assistantContent,
         timestamp: Date.now(),
+        msgSeq: msgSeqs.length ? msgSeqs[msgSeqs.length - 1] : undefined,
         citations: citations.map(citation => ({
           target_id: citation.target_id,
           target_type: citation.target_type,
@@ -430,6 +509,7 @@ export function useAIChat(options?: {
         gap_analysis: payload.gap_analysis,
         confidence_breakdown: payload.confidence_breakdown,
         thinking_trace: payload.thinking_trace || [],
+        interim_answers: interimAnswers.value.length ? [...interimAnswers.value] : undefined,
         debug: payload.debug
       })
       currentStreamContent.value = ''
@@ -451,16 +531,24 @@ export function useAIChat(options?: {
         }
       } else {
         console.error('Chat error:', error)
+        const message = error instanceof Error ? error.message : '未知错误'
+        const code = (error as Error & { code?: string })?.code
+        options?.onError?.(error instanceof Error ? error : new Error(message))
+        // login_required 是业务态（游客轮闸）而非故障：不带「出错了」前缀，
+        // 宿主挂了 AuthGate 会盖住这条气泡，未挂的宿主也能看到可读提示
         messages.value.push({
           id: generateMessageId(),
           role: 'assistant',
-          content: `抱歉，对话出现错误：${error instanceof Error ? error.message : '未知错误'}`,
+          content: code === 'login_required' ? message : `抱歉，对话出现错误：${message}`,
           timestamp: Date.now()
         })
       }
     } finally {
       loading.value = false
       currentStreamContent.value = ''
+      interimAnswers.value = []
+      progressStage.value = ''
+      resetRunTimers()
       abortController.value = null
       abortReason.value = null
       saveToPool()
@@ -547,6 +635,9 @@ export function useAIChat(options?: {
     currentSessionKey,
     contextTokens,
     contextRounds,
+    interimAnswers,
+    progressStage,
+    elapsedSeconds,
     queuedMessages,
     sendMessage,
     stopGeneration,

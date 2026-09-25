@@ -148,6 +148,10 @@
               </div>
 
               <div class="answer-text" v-html="renderAssistantContent(msg)" />
+              <details v-for="(interim, iIdx) in (msg.interim_answers || [])" :key="iIdx" class="interim-answer">
+                <summary>中间输出（已被最终回答顶替，点击展开）</summary>
+                <div class="interim-answer-body">{{ interim }}</div>
+              </details>
             </div>
           </template>
 
@@ -179,13 +183,17 @@
                 </div>
               </div>
             </div>
+            <details v-for="(interim, idx) in interimAnswers" :key="idx" class="interim-answer">
+              <summary>中间输出（已被最终回答顶替，点击展开）</summary>
+              <div class="interim-answer-body">{{ interim }}</div>
+            </details>
             <template v-if="currentStreamContent">
               <div class="answer-text" v-html="renderContent(currentStreamContent, streamingCitations)" />
               <span class="streaming-cursor">|</span>
             </template>
             <div v-else class="streaming-loading">
               <a-spin size="small" />
-              <span class="loading-text">思考中...</span>
+              <span class="loading-text">{{ progressText }}</span>
             </div>
           </div>
         </div>
@@ -290,10 +298,10 @@
             />
           </div>
 
-          <div class="center-actions">
+          <div v-if="showModelSelect" class="center-actions">
             <a-select
-              v-model:value="selectedModel"
-              class="model-select"
+                v-model:value="selectedModel"
+                class="model-select"
               size="small"
               :loading="loadingModels"
               :disabled="loading"
@@ -396,6 +404,8 @@ interface Props {
   currentStreamContent?: string
   models?: BaseChatModelOption[]
   loadingModels?: boolean
+  /** 模型选择器显隐（默认 true；游客态宿主传 false，避免未登录用户挑选模型消耗宿主 token） */
+  showModelSelect?: boolean
   defaultModel?: string
   placeholder?: string
   contextItems?: BaseChatContextItem[]
@@ -406,6 +416,12 @@ interface Props {
   contextTokens?: number
   contextRounds?: number
   streamingThinkingSteps?: ThinkingTraceStep[]
+  /** 中间轮被顶替的正文快照（拒答重答/截断重试），流式期间置灰折叠展示 */
+  interimAnswers?: string[]
+  /** 等待期阶段（classify/search/generate），驱动分段进度文案；空串退回「思考中...」 */
+  progressStage?: string
+  /** 当前阶段已持续秒数 */
+  elapsedSeconds?: number
   renderMessage?: (content: string) => string
   searchCitations?: (query: string) => Promise<InlineCitationCandidate[]>
   /** Hero 模式：无消息时整体垂直居中、输入卡片浮起居中（对话入口态） */
@@ -424,6 +440,7 @@ const props = withDefaults(defineProps<Props>(), {
   currentStreamContent: '',
   models: () => [],
   loadingModels: false,
+  showModelSelect: true,
   defaultModel: '',
   placeholder: '输入消息，按Enter发送\n按Shift+Enter换行...',
   contextItems: () => [],
@@ -440,7 +457,10 @@ const props = withDefaults(defineProps<Props>(), {
   mentionLabel: '插入引用 @',
   libraryOptions: () => [],
   libraryValue: '',
-  queuedMessages: () => []
+  queuedMessages: () => [],
+  interimAnswers: () => [],
+  progressStage: '',
+  elapsedSeconds: 0
 })
 
 const emit = defineEmits<{
@@ -495,6 +515,22 @@ const streamingCitations = computed(() => buildStreamingCitations())
 
 const getStreamingStepCount = computed(() => countThinkingSteps(streamingThinkingGroups.value))
 const getStreamingDuration = computed(() => sumThinkingDuration(streamingThinkingGroups.value))
+
+/** 等待期分段进度文案（A3）：按 transport 阶段事件推进，检索阶段带实时秒数；
+ *  stage 为空（旧 transport 未上报）退回「思考中...」 */
+const progressText = computed(() => {
+  const seconds = props.elapsedSeconds > 0 ? `（${props.elapsedSeconds}s）` : ''
+  switch (props.progressStage) {
+    case 'classify':
+      return '意图理解…'
+    case 'search':
+      return `检索规范库…${seconds}`
+    case 'generate':
+      return '生成回答…'
+    default:
+      return '思考中...'
+  }
+})
 
 /**
  * 去重引用，避免同页同段重复展示。
@@ -1314,8 +1350,10 @@ defineExpose({
             margin: 0 2px;
             padding: 0 3px;
             border-radius: 50%;
-            background: #3f3f46;
-            color: #d4d4d8;
+            box-sizing: border-box;
+            background: var(--aichat-citation-circle-bg, var(--chat-citation-circle-bg, #e9eaec));
+            border: 1px solid var(--aichat-citation-circle-border, var(--chat-citation-circle-border, #cfcfd4));
+            color: var(--aichat-citation-circle-color, var(--chat-citation-circle-text, #55565c));
             font-size: 10px;
             font-weight: 600;
             line-height: 1;
@@ -1325,6 +1363,8 @@ defineExpose({
 
             &:hover {
               background-color: var(--primary-color);
+              border-color: var(--primary-color);
+              color: #fff;
             }
           }
 
@@ -1337,8 +1377,10 @@ defineExpose({
             margin: 0 2px;
             padding: 0 3px;
             border-radius: 50%;
-            background: #3f3f46;
-            color: #d4d4d8;
+            box-sizing: border-box;
+            background: var(--aichat-citation-circle-bg, var(--chat-citation-circle-bg, #e9eaec));
+            border: 1px solid var(--aichat-citation-circle-border, var(--chat-citation-circle-border, #cfcfd4));
+            color: var(--aichat-citation-circle-color, var(--chat-citation-circle-text, #55565c));
             font-size: 10px;
             font-weight: 600;
             line-height: 1;
@@ -1670,6 +1712,28 @@ defineExpose({
           }
         }
 
+        .interim-answer {
+          margin-bottom: 8px;
+          font-size: 12px;
+          color: var(--text-secondary);
+          opacity: 0.75;
+
+          summary {
+            cursor: pointer;
+            user-select: none;
+          }
+
+          .interim-answer-body {
+            margin-top: 4px;
+            padding: 8px 10px;
+            border-left: 2px solid var(--border-color, #e5e5e5);
+            white-space: pre-wrap;
+            word-break: break-word;
+            max-height: 160px;
+            overflow-y: auto;
+          }
+        }
+
         .loading-text {
           margin-left: 8px;
           color: var(--text-secondary);
@@ -1871,8 +1935,9 @@ defineExpose({
 .chat-input {
   flex-shrink: 0;
   padding: 12px 16px;
-  border-top: 1px solid var(--border-color);
-  background: var(--bg-secondary, #fafafa);
+  /* 对话态与 hero 态同构：外层不铺底板/分隔线，只剩编辑器自身的圆角描边（0.2.x 用户反馈矩形灰底难看） */
+  border-top: none;
+  background: transparent;
   display: flex;
   flex-direction: column;
   overflow: visible;
@@ -1942,11 +2007,11 @@ defineExpose({
       min-width: 0;
 
       .mention-trigger-btn {
-        color: rgba(255, 255, 255, 0.7);
+        color: var(--aichat-mention-trigger-color, var(--text-secondary, rgba(0, 0, 0, 0.55)));
 
         &:hover,
         &:focus {
-          color: rgba(255, 255, 255, 0.88);
+          color: var(--aichat-mention-trigger-hover-color, var(--text-primary, rgba(0, 0, 0, 0.88)));
         }
       }
 
@@ -2040,6 +2105,9 @@ defineExpose({
       align-items: center;
       gap: 8px;
       flex-shrink: 0;
+      /* center-actions（模型选择器）被宿主隐藏时靠它把发送按钮顶回右侧——
+         原布局靠 center-actions 的 flex:1 撑开，v-if 隐藏后发送按钮会塌到左边 */
+      margin-left: auto;
 
       .icon-btn {
         width: 24px;
