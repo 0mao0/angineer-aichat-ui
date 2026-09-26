@@ -7,6 +7,7 @@
 - feat: `BaseChatMessage` / `AIChatMessage` 新增 `interim_answers` 字段（历史气泡回看被替换的中间答案）
 - fix: 发给后端的 `session_id` 改发裸 id（剥掉池 key 的 `scene:` 前缀）——此前落库在 `docs:chat-x` 而宿主记录层打裸 id，快照补丁 400 unknown msg_seq 静默丢失、会话列表同会话双 id（服务端池 key 本就含 scene，行为不变；存量带前缀行保留仍可用）
 - fix: 输入区 @ 按钮与答案角标去硬编码深色（light 模式白字隐形/浅底近黑圆喧宾夺主，v0.0.51 深色时代遗留），三轮迭代定案中性灰双主题：新 token 三件套 `--chat-citation-circle-{bg,border,text}`（light 浅灰圆面+中灰数字、dark 深灰圆+浅灰数字），hover 主色+白字不变
+- fix: 中断时先冲刷 delta 合帧缓冲——50ms 合帧节流引入的回归：手动停止/插队时最后 ≤50ms 的 delta 压在缓冲里没落盘，截断答案丢尾；另将 run 计时器 unref（run 悬置时 interval 不再压住 Node 事件循环，测试/SSR 进程可自然退出）
 - test: useAIChat 用例断言裸 session_id 与跟进式改写相关契约
 
 ## 0.1.9
