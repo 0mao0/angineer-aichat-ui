@@ -155,6 +155,8 @@ export function useAIChat(options?: {
   contextConfig?: Partial<AIChatContextConfig>
   systemPrompt?: string
   libraryId?: string | Ref<string>
+  /** 多库勾选集合（阶段三）：非空时载荷带 library_ids；宿主保证 libraryId=集合首项 */
+  libraryIds?: Ref<string[]>
   scene?: string
   sessionId?: string | Ref<string>
   getContextItems?: () => Array<{ id: string; title: string }>
@@ -400,6 +402,7 @@ export function useAIChat(options?: {
       .filter(binding => String(binding.reference?.targetType || '') === 'document')
       .map(binding => String(binding.reference?.docId || binding.reference?.targetId || ''))
       .filter(Boolean)
+    const selectedLibraryIds = unref(options?.libraryIds) ?? []
     const queryRequest: QueryRequest = {
       query: userMessage.content,
       scene,
@@ -409,9 +412,14 @@ export function useAIChat(options?: {
       // 且列表出现同会话双 id（2026-09-25 排查定位）
       session_id: currentSessionKey.value.slice(buildSessionKey(scene, '').length),
       library_id: String(unref(options?.libraryId) || 'default'),
+      library_ids: selectedLibraryIds.length ? [...selectedLibraryIds] : undefined,
       doc_ids: [...new Set([...contextItems.map(item => item.id), ...mentionedDocIds])],
       inline_citations: inlineCitations,
     }
+
+    // 警示随最近一次请求（2026-10-04 验收）：后端仅在范围全空时发 warning 帧，
+    // 本次成功检索则无帧可覆盖——不主动清，上一轮的空库横幅会在提问成功后常驻
+    systemWarning.value = ''
 
     abortController.value = new AbortController()
 
@@ -503,7 +511,9 @@ export function useAIChat(options?: {
           content: citation.content,
           content_type: citation.content_type,
           score: citation.score,
-          rich_media: citation.rich_media
+          rich_media: citation.rich_media,
+          // 阶段三：归属库随消息持久化，宿主按它定位溯源面板（多库下非首库文档不再 404）
+          library_id: citation.library_id
         })),
         strategy: payload.strategy,
         task_type: payload.task_type,
@@ -615,12 +625,39 @@ export function useAIChat(options?: {
     saveToPool()
   }
 
+  /**
+   * 判断是否为 agent 内部消息（不可展示）：
+   * 服务端历史原样落库了工具链路消息——「首轮直达」注入的 assistant 工具调用、模型的工具决策轮，
+   * 其 content 是 tool_calls 围栏或纯 JSON 工具调用；它们是思考过程素材而非对话正文（2026-09-30 实踩：
+   * 直接渲染成一条 JSON 代码块气泡）。注入消息带 meta.injected_tool_call，其余按内容形状严格判定。
+   */
+  const isInternalToolCallMessage = (message: AIChatMessage): boolean => {
+    if (message.role !== 'assistant') return false
+    if ((message as unknown as Record<string, unknown>).injected_tool_call) return true
+    const text = String(message.content || '').trim()
+    if (!text) return false
+    if (/^```tool_calls/.test(text)) return true
+    if (!text.startsWith('[') && !text.startsWith('{')) return false
+    try {
+      const parsed = JSON.parse(text)
+      const items = Array.isArray(parsed) ? parsed : [parsed]
+      return items.length > 0 && items.every(
+        (item: unknown) => !!item && typeof item === 'object'
+          && 'name' in (item as Record<string, unknown>)
+          && 'arguments' in (item as Record<string, unknown>)
+      )
+    } catch {
+      return false
+    }
+  }
+
   /** 灌入一组历史消息到当前会话（历史对话恢复用），中止进行中的生成并写回会话池 */
   const loadMessages = (newMessages: AIChatMessage[]): void => {
     stopGeneration()
     queuedMessages.value = []
     queuePaused.value = false
-    messages.value = [...newMessages]
+    // 服务端历史含内部工具链路消息：加载收口处剔除，只留可展示对话
+    messages.value = [...newMessages].filter(message => !isInternalToolCallMessage(message))
     saveToPool()
   }
 

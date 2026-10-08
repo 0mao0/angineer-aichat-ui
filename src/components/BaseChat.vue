@@ -17,7 +17,7 @@
     </div>
 
     <div class="chat-messages-wrap">
-      <div ref="messagesRef" class="chat-messages" @click="handleMessageClick">
+      <div ref="messagesRef" class="chat-messages" @click="handleMessageClick" @scroll="handleMessagesScroll" @wheel="handleMessagesWheel">
         <div v-if="hero && !displayMessages.length" class="chat-hero">
           <slot name="hero" />
         </div>
@@ -74,7 +74,7 @@
                   <BulbOutlined class="thinking-card-icon" />
                   <span class="thinking-card-label">
                     思考过程
-                    <template v-if="getThinkingStepCount(msg)">（{{ getThinkingStepCount(msg) }} 步<template v-if="getThinkingDuration(msg)"> · 工具耗时合计 {{ formatDuration(getThinkingDuration(msg)) }}</template>）</template>
+                    <template v-if="getThinkingStepCount(msg)">（{{ getThinkingStepCount(msg) }} 步<template v-if="getThinkingWall(msg)"> · 总耗时 {{ formatDuration(getThinkingWall(msg)) }}</template>）</template>
                   </span>
                   <span class="thinking-card-arrow">
                     <DownOutlined v-if="isThinkingExpanded(msg)" />
@@ -171,7 +171,7 @@
               <div class="thinking-card-header static">
                 <BulbOutlined class="thinking-card-icon" />
                 <span class="thinking-card-label">
-                  思考过程（{{ getStreamingStepCount }} 步<template v-if="getStreamingDuration"> · 工具耗时合计 {{ formatDuration(getStreamingDuration) }}</template>）
+                  思考过程（{{ getStreamingStepCount }} 步<template v-if="getStreamingWall"> · 总耗时 {{ formatDuration(getStreamingWall) }}</template>）
                 </span>
               </div>
               <div class="thinking-card-body">
@@ -203,14 +203,30 @@
       <div v-if="showContextInfo && !title" class="context-info-float">
         {{ contextRounds }}轮 / {{ formatTokenCount(contextTokens) }}tokens
       </div>
-    </div>
 
-    <div
-      class="resize-handle"
-      title="拖动调整输入区域高度"
-      @mousedown="startResize"
-    >
-      <div class="resize-indicator"></div>
+      <!-- 输入框右上角外侧：骑在输入框上沿（对话态常驻） -->
+      <button
+        v-if="showNewChat && displayMessages.length"
+        type="button"
+        class="new-chat-float"
+        @click="emit('newChat')"
+      >
+        <PlusOutlined />
+        {{ newChatLabel }}
+      </button>
+
+      <transition name="scroll-hint">
+        <button
+          v-if="!isPinnedToBottom"
+          type="button"
+          class="scroll-to-bottom-btn"
+          title="回底部并恢复自动跟随"
+          @click="handleScrollToBottomClick"
+        >
+          回底部
+          <DownOutlined />
+        </button>
+      </transition>
     </div>
 
     <div v-if="queuedMessages.length" class="pending-queue">
@@ -252,7 +268,7 @@
       </div>
     </div>
 
-    <div ref="chatInputRef" class="chat-input" :style="{ height: `${inputHeight}px` }">
+    <div class="chat-input">
       <div v-if="contextItems.length" class="context-hint">
         <a-tag
           v-for="item in contextItems"
@@ -265,6 +281,7 @@
       </div>
 
       <div class="input-wrapper">
+        <div class="input-box">
         <InlineCitationEditor
           ref="inlineCitationEditorRef"
           v-model="composerValue"
@@ -274,8 +291,28 @@
           @select-citation="handleInlineCitationSelect"
         />
 
-        <div class="input-actions">
+          <div class="input-actions">
           <div class="left-actions">
+            <a-select
+              v-if="libraryOptions.length"
+              class="library-select"
+              size="small"
+              :value="libraryMulti ? libraryValues : (libraryValue || undefined)"
+              :mode="libraryMulti ? 'multiple' : undefined"
+              :max-tag-count="libraryMulti && libraryValues.length > 1 ? 0 : undefined"
+              :disabled="loading || (conversationStarted && !libraryMulti)"
+              :options="libraryOptions"
+              :title="libraryTitle"
+              :dropdown-match-select-width="false"
+              :dropdown-style="{ minWidth: '200px' }"
+              @update:value="onLibrarySelectChange"
+            >
+              <!-- 多库收口（用户定式 2026-10-04）：勾选 >1 库时不逐个出 tag，折叠占位统一显示「N 个知识库」；
+                   单库仍显示库名 tag。maxTagCount=0 经 vc-overflow 确认渲染 0 tag + 1 rest（4.2.6）。 -->
+              <template v-if="libraryMulti" #maxTagPlaceholder="omitted">
+                {{ omitted.length }} 个知识库
+              </template>
+            </a-select>
             <a-button
               type="text"
               size="small"
@@ -286,16 +323,6 @@
             >
               @
             </a-button>
-            <a-select
-              v-if="libraryOptions.length"
-              class="library-select"
-              size="small"
-              :value="libraryValue || undefined"
-              :disabled="loading || conversationStarted"
-              :options="libraryOptions"
-              :title="libraryTitle"
-              @change="(value: string) => emit('update:libraryValue', value)"
-            />
           </div>
 
           <div v-if="showModelSelect" class="center-actions">
@@ -345,7 +372,25 @@
             </a-button>
           </div>
         </div>
+        </div>
       </div>
+    </div>
+
+    <!-- Hero 态专属扩展区（引导问题/站点特色徽标等），会话开始即隐藏；宿主未传 slot 且无引导问题时整块不渲染 -->
+    <div
+      v-if="hero && !displayMessages.length && !loading && !currentStreamContent && ($slots['hero-below'] || suggestedQuestions.length)"
+      class="hero-below"
+    >
+      <button
+        v-for="question in suggestedQuestions"
+        :key="question"
+        type="button"
+        class="hero-question"
+        @click="handleSuggestedQuestion(question)"
+      >
+        {{ question }}
+      </button>
+      <slot name="hero-below" />
     </div>
   </div>
 </template>
@@ -355,7 +400,7 @@
  * 基础聊天组件。
  * 负责通用聊天 UI、输入区交互与消息展示，不直接耦合具体知识域接口。
  */
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import {
   ClearOutlined,
   SendOutlined,
@@ -365,6 +410,7 @@ import {
   InfoCircleOutlined,
   BulbOutlined,
   DownOutlined,
+  PlusOutlined,
   RightOutlined
 } from '@ant-design/icons-vue'
 import CitationInline from './CitationInline.vue'
@@ -392,11 +438,12 @@ import {
   countThinkingSteps,
   formatDuration,
   groupThinkingSteps,
-  sumThinkingDuration,
+  thinkingWallMs,
 } from '../utils/thinking'
 import { formatTokenCount } from '../utils/token'
 import { message } from 'ant-design-vue'
 import { QUEUE_LIMIT } from '../composables/useAIChat'
+import { MAX_LIBRARY_SELECTION } from '../constants'
 
 interface Props {
   messages: BaseChatMessage[]
@@ -426,12 +473,22 @@ interface Props {
   searchCitations?: (query: string) => Promise<InlineCitationCandidate[]>
   /** Hero 模式：无消息时整体垂直居中、输入卡片浮起居中（对话入口态） */
   hero?: boolean
+  /** Hero 空态引导问题：点击即按该问题直发；不传或空数组不渲染（可开可关），内容归宿主定 */
+  suggestedQuestions?: string[]
+  /** 对话态在输入框上方左侧显示「新对话」浮层按钮（hero 空态不出现）；点击只发 newChat 事件，会话重置归宿主 */
+  showNewChat?: boolean
+  /** 新对话浮层按钮文案 */
+  newChatLabel?: string
   /** @ 按钮提示文案（宿主按提及粒度定制，如“提及文档 @”） */
   mentionLabel?: string
   /** 知识库单选下拉选项（为空时不渲染，向后兼容） */
   libraryOptions?: Array<{ value: string; label: string }>
   /** 当前选中的知识库 id */
   libraryValue?: string
+  /** 多库勾选集合（阶段三）：libraryMulti 为 true 时生效 */
+  libraryValues?: string[]
+  /** 多选模式开关（默认 false=单选，向后兼容） */
+  libraryMulti?: boolean
   /** 生成期间排队的待发送消息 */
   queuedMessages?: QueuedMessage[]
 }
@@ -454,9 +511,14 @@ const props = withDefaults(defineProps<Props>(), {
   renderMessage: undefined,
   searchCitations: undefined,
   hero: false,
+  suggestedQuestions: () => [],
+  showNewChat: false,
+  newChatLabel: '新对话',
   mentionLabel: '插入引用 @',
   libraryOptions: () => [],
   libraryValue: '',
+  libraryValues: () => [],
+  libraryMulti: false,
   queuedMessages: () => [],
   interimAnswers: () => [],
   progressStage: '',
@@ -472,32 +534,56 @@ const emit = defineEmits<{
   modelChange: [model: string]
   selectCitation: [citation: BaseChatCitation]
   'update:libraryValue': [libraryId: string]
+  'update:libraryValues': [libraryIds: string[]]
   /** 删除一条待发送消息 */
   removeQueued: [id: string]
   /** 插队：打断当前生成并立即发送该条 */
   promoteQueued: [id: string]
+  /** 新对话（浮层按钮）：只通知宿主重置会话，组件内不自清消息 */
+  newChat: []
 }>()
 
 const messagesRef = ref<HTMLElement | null>(null)
-const chatInputRef = ref<HTMLElement | null>(null)
+/** 自动跟随底部：用户手动上滑即解除，回到底部或重新发送时恢复 */
+const isPinnedToBottom = ref(true)
+const lastScrollTop = ref(0)
+const lastScrollHeight = ref(0)
+/** 距底部超过该阈值视为「离开底部」（px） */
+const PIN_BOTTOM_THRESHOLD = 48
 const inlineCitationEditorRef = ref<InstanceType<typeof InlineCitationEditor> | null>(null)
 const composerValue = ref<BaseChatSendPayload>({ content: '', citations: [] })
 /** 对话「起步」判定：存在非 system 消息即锁库（空会话可自由换库） */
 const conversationStarted = computed(() => props.messages.some(m => m.role !== 'system'))
-const lockedLibraryLabel = computed(
-  () => props.libraryOptions.find(option => option.value === props.libraryValue)?.label || ''
-)
-const libraryTitle = computed(() => conversationStarted.value
-  ? `本对话已锁定知识库${lockedLibraryLabel.value ? ` ${lockedLibraryLabel.value}` : ''}，换库请点新建对话`
-  : '选择知识库（单选）')
+const lockedLibraryLabel = computed(() => {
+  if (!props.libraryMulti) {
+    return props.libraryOptions.find(o => o.value === props.libraryValue)?.label || ''
+  }
+  return props.libraryValues
+    .map(id => props.libraryOptions.find(o => o.value === id)?.label || id)
+    .join('、')
+})
+// 文案定稿：单选=原锁定文案；多选起步后不锁，提示集合语义与续接
+const libraryTitle = computed(() => {
+  if (!props.libraryMulti) {
+    return conversationStarted.value
+      ? `本对话已锁定知识库${lockedLibraryLabel.value ? ` ${lockedLibraryLabel.value}` : ''}，换库请点新建对话`
+      : '选择知识库（单选）'
+  }
+  return conversationStarted.value
+    ? `本轮起检索所选知识库集合（${lockedLibraryLabel.value || '未选'}），上下文跨集合续接`
+    : `选择知识库（可多选，≤${MAX_LIBRARY_SELECTION}）`
+})
+
+const onLibrarySelectChange = (value: string | string[]) => {
+  if (props.libraryMulti) {
+    // 上限前端先拦（服务端 ANGINEER_MAX_CHAT_LIBRARIES 兜底截断）；常量与文案共用
+    emit('update:libraryValues', (Array.isArray(value) ? value : [value]).slice(0, MAX_LIBRARY_SELECTION))
+  } else {
+    emit('update:libraryValue', value as string)
+  }
+}
 const selectedModel = ref(props.defaultModel)
-const inputHeight = ref(150)
-const isResizing = ref(false)
-const startY = ref(0)
-const startHeight = ref(0)
 const expandedCitationKeys = ref<string[]>([])
-const minInputHeight = 100
-const maxInputHeightRatio = 0.5
 
 const displayMessages = computed(() => {
   if (props.showSystemMessages) {
@@ -514,19 +600,19 @@ const streamingThinkingGroups = computed(() => (
 const streamingCitations = computed(() => buildStreamingCitations())
 
 const getStreamingStepCount = computed(() => countThinkingSteps(streamingThinkingGroups.value))
-const getStreamingDuration = computed(() => sumThinkingDuration(streamingThinkingGroups.value))
+const getStreamingWall = computed(() => thinkingWallMs(streamingThinkingGroups.value))
 
-/** 等待期分段进度文案（A3）：按 transport 阶段事件推进，检索阶段带实时秒数；
+/** 等待期分段进度文案（A3）：按 transport 阶段事件推进，各阶段带实时秒数；
  *  stage 为空（旧 transport 未上报）退回「思考中...」 */
 const progressText = computed(() => {
   const seconds = props.elapsedSeconds > 0 ? `（${props.elapsedSeconds}s）` : ''
   switch (props.progressStage) {
     case 'classify':
-      return '意图理解…'
+      return `意图理解…${seconds}`
     case 'search':
       return `检索规范库…${seconds}`
     case 'generate':
-      return '生成回答…'
+      return `生成回答…${seconds}`
     default:
       return '思考中...'
   }
@@ -633,8 +719,8 @@ const getThinkingStepCount = (message: BaseChatMessage) => (
   countThinkingSteps(getThinkingGroups(message))
 )
 
-const getThinkingDuration = (message: BaseChatMessage) => (
-  sumThinkingDuration(getThinkingGroups(message))
+const getThinkingWall = (message: BaseChatMessage) => (
+  thinkingWallMs(getThinkingGroups(message))
 )
 
 const isThinkingExpanded = (message: BaseChatMessage) => (
@@ -902,13 +988,61 @@ const getInlineSegments = (message: BaseChatMessage) => buildCitationSegments({
 
 /**
  * 将消息区域滚动到底部。
+ * force=true 时恢复自动跟随（发送新消息、点击「回底部」）；
+ * 平时仅在跟随开启时才滚动，避免打断用户上滑回看上文。
  */
-const scrollToBottom = () => {
+const scrollToBottom = (force = false) => {
+  if (force) {
+    isPinnedToBottom.value = true
+  }
+  if (!isPinnedToBottom.value) {
+    return
+  }
   nextTick(() => {
     if (messagesRef.value) {
       messagesRef.value.scrollTop = messagesRef.value.scrollHeight
     }
   })
+}
+
+/**
+ * 区分「用户上滑」与「程序滚动/内容重排」：
+ * 只有在 scrollHeight 未变的前提下 scrollTop 减少（滚动条上拖、键盘翻页）
+ * 且离开底部超过阈值，才停止自动跟随——流式 markdown 重排会瞬间收缩
+ * scrollHeight 令浏览器截断 scrollTop，酷似上滑但不能归因给用户。
+ * 回到底部阈值内则恢复跟随。
+ */
+const handleMessagesScroll = () => {
+  const el = messagesRef.value
+  if (!el) return
+  const distanceToBottom = el.scrollHeight - el.scrollTop - el.clientHeight
+  const goingUp = el.scrollTop < lastScrollTop.value - 1
+  const heightUnchanged = el.scrollHeight === lastScrollHeight.value
+  lastScrollTop.value = el.scrollTop
+  lastScrollHeight.value = el.scrollHeight
+  if (distanceToBottom <= PIN_BOTTOM_THRESHOLD) {
+    isPinnedToBottom.value = true
+  } else if (goingUp && heightUnchanged) {
+    isPinnedToBottom.value = false
+  }
+}
+
+/**
+ * 滚轮上滚是明确的用户回看意图（滚动事件会与流式重排合帧失真，wheel 不会）。
+ */
+const handleMessagesWheel = (event: WheelEvent) => {
+  if (event.deltaY >= 0) return
+  const el = messagesRef.value
+  if (!el) return
+  const distanceToBottom = el.scrollHeight - el.scrollTop - el.clientHeight
+  if (distanceToBottom > PIN_BOTTOM_THRESHOLD) {
+    isPinnedToBottom.value = false
+  }
+}
+
+/** 点击「回底部」：恢复跟随并滚到底部 */
+const handleScrollToBottomClick = () => {
+  scrollToBottom(true)
 }
 
 /**
@@ -948,7 +1082,15 @@ const handleSend = () => {
 
   emit('send', payload, selectedModel.value)
   resetComposer()
-  scrollToBottom()
+  scrollToBottom(true)
+}
+
+/**
+ * 点击引导问题：按该问题直发（与手动发送同 emit 链路、同恢复跟随），不经输入框。
+ */
+const handleSuggestedQuestion = (question: string) => {
+  emit('send', { content: question, citations: [] }, selectedModel.value)
+  scrollToBottom(true)
 }
 
 /**
@@ -1023,45 +1165,8 @@ const handleEditQueued = (item: QueuedMessage) => {
   nextTick(() => inlineCitationEditorRef.value?.focusEditor())
 }
 
-/**
- * 开始拖动调整输入区高度。
- */
-const startResize = (event: MouseEvent) => {
-  isResizing.value = true
-  startY.value = event.clientY
-  startHeight.value = inputHeight.value
-
-  document.addEventListener('mousemove', handleResize)
-  document.addEventListener('mouseup', stopResize)
-}
-
-/**
- * 根据鼠标位移实时更新输入区高度。
- */
-const handleResize = (event: MouseEvent) => {
-  if (!isResizing.value) {
-    return
-  }
-
-  const deltaY = startY.value - event.clientY
-  const newHeight = startHeight.value + deltaY
-  const parentHeight = chatInputRef.value?.parentElement?.clientHeight || window.innerHeight
-  const maxHeight = parentHeight * maxInputHeightRatio
-
-  inputHeight.value = Math.max(minInputHeight, Math.min(newHeight, maxHeight))
-}
-
-/**
- * 结束拖动调整并解绑全局事件。
- */
-const stopResize = () => {
-  isResizing.value = false
-  document.removeEventListener('mousemove', handleResize)
-  document.removeEventListener('mouseup', stopResize)
-}
-
-watch(() => props.messages.length, scrollToBottom)
-watch(() => props.currentStreamContent, scrollToBottom)
+watch(() => props.messages.length, () => scrollToBottom())
+watch(() => props.currentStreamContent, () => scrollToBottom())
 watch(() => props.loading, value => {
   if (value) {
     resetComposer()
@@ -1075,10 +1180,6 @@ watch(() => props.models, syncSelectedModel, { deep: true, immediate: true })
 onMounted(() => {
   syncSelectedModel()
   emit('ready')
-})
-
-onBeforeUnmount(() => {
-  stopResize()
 })
 
 defineExpose({
@@ -1158,6 +1259,54 @@ defineExpose({
   opacity: 0.9;
 }
 
+.scroll-to-bottom-btn,
+.new-chat-float {
+  /* 浮层胶囊：位置由各自规则决定（回底部在「新对话」正上方） */
+  position: absolute;
+  z-index: 3;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--aichat-input-float-border, var(--border-color, #d9d9d9));
+  background: var(--aichat-input-float-bg, var(--bg-secondary, #fafafa));
+  color: var(--aichat-input-float-color, var(--text-secondary, #595959));
+  font: inherit;
+  font-size: 12px;
+  line-height: 20px;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+
+  &:hover {
+    color: var(--primary-color, #1677ff);
+    border-color: var(--primary-color, #1677ff);
+  }
+}
+
+.scroll-to-bottom-btn {
+  /* 叠在「新对话」正上方（同右对齐，间距 8px） */
+  right: 16px;
+  bottom: 35px;
+}
+
+.new-chat-float {
+  /* 与「回底部」平齐：同右对齐叠放，右侧对称 */
+  right: 16px;
+  bottom: -4px;
+}
+
+.scroll-hint-enter-active,
+.scroll-hint-leave-active {
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+
+.scroll-hint-enter-from,
+.scroll-hint-leave-to {
+  opacity: 0;
+  transform: translateY(6px);
+}
+
 .chat-messages {
   flex: 1;
   min-height: 0;
@@ -1230,6 +1379,10 @@ defineExpose({
         display: inline-block;
         background: var(--chat-assistant-bubble-bg, #f5f5f5);
         color: var(--chat-assistant-bubble-text, #000000);
+        /* 浅色主题下气泡底 #f5f5f5 与页底 #f0f2f5 几乎同色，肉眼看不到气泡边界（业主 09-27）：
+           宿主按主题给描边色（浅色给可见细线、深色给 transparent），无宿主时保持无边界（transparent） */
+        border: 1px solid var(--aichat-assistant-bubble-border, var(--chat-assistant-bubble-border, transparent));
+        box-sizing: border-box;
         padding: 12px 16px;
         border-radius: 12px 12px 12px 0;
         max-width: 85%;
@@ -1362,6 +1515,7 @@ defineExpose({
             transition: background-color 0.16s ease;
 
             &:hover {
+              /* 悬停＝主色蓝 + 白字（业主 09-27 复评：蓝悬停观感更好，别再改成灰） */
               background-color: var(--primary-color);
               border-color: var(--primary-color);
               color: #fff;
@@ -1784,33 +1938,6 @@ defineExpose({
   51%, 100% { opacity: 0; }
 }
 
-.resize-handle {
-  height: 8px;
-  flex-shrink: 0;
-  background: transparent;
-  cursor: row-resize;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: background 0.2s;
-
-  &:hover {
-    background: var(--border-color);
-  }
-
-  .resize-indicator {
-    width: 40px;
-    height: 3px;
-    background: var(--border-color);
-    border-radius: 2px;
-    transition: background 0.2s;
-  }
-
-  &:hover .resize-indicator {
-    background: var(--primary-color);
-  }
-}
-
 /* 待发送托盘：浅色主题下 --bg-tertiary(≈#fafafa) 与输入框 --bg-secondary(#fafafa) 数值相同，
    用它做底色等于没有底色（只剩一根几乎看不见的边框）。改为 primary 淡染 + 同色描边，
    两种主题下都是明确独立的一块，语义上也贴合「排队中」。圆角与输入框统一为 12px。 */
@@ -1932,9 +2059,25 @@ defineExpose({
   }
 }
 
+/* 输入盒暗色描边：宿主 ui-kit 走 html.dark 类，其 --border-color 恒为浅色档值（黑底黑线看不清）。
+   落私有回退变量而非 border-color——避免比权重压掉 :hover/:focus-within 的焦点环；
+   宿主显式设 --chat-input-surface-border 时仍最高优先（回退链第一档） */
+html.dark .input-box,
+[data-theme='dark'] .input-box {
+  --aichat-input-box-border: rgba(255, 255, 255, 0.28);
+}
+
+/* 引导问题胶囊同理：透明底，描边是唯一轮廓；0.36 用于补偿整卡 0.75 透明度后的等效亮度 */
+html.dark .hero-question,
+[data-theme='dark'] .hero-question {
+  --aichat-hero-question-border-fallback: rgba(255, 255, 255, 0.36);
+}
+
 .chat-input {
   flex-shrink: 0;
-  padding: 12px 16px;
+  /* 空闲态基础高度固定；内容增长由编辑器 auto-grow 承担（上限 45vh），不再有拖拽调整 */
+  min-height: 150px;
+  padding: 8px 16px 12px;
   /* 对话态与 hero 态同构：外层不铺底板/分隔线，只剩编辑器自身的圆角描边（0.2.x 用户反馈矩形灰底难看） */
   border-top: none;
   background: transparent;
@@ -1960,6 +2103,45 @@ defineExpose({
     overflow: visible;
     z-index: 6;
 
+    /* 输入框视觉盒：边框/焦点环从编辑器挪到整盒（编辑器 + 底部操作行同框，DeepSeek 形态），
+       操作行在正常流内，文字区永远止于操作行上方，不重合 */
+    .input-box {
+      display: flex;
+      flex-direction: column;
+      flex: 1;
+      min-height: 0;
+      border: 1px solid var(--chat-input-surface-border, var(--aichat-input-box-border, rgba(0, 0, 0, 0.25)));
+      border-radius: 12px;
+      transition: border-color 150ms ease, box-shadow 150ms ease;
+
+      &:hover,
+      &:focus-within {
+        border-color: var(--primary-color, #1890ff);
+        box-shadow: 0 0 0 2px rgba(24, 144, 255, 0.2);
+      }
+
+      /* 编辑器随内容自动长高（上限 45vh）后内部滚动；边框/焦点环已由 .input-box 承担 */
+      :deep(.inline-citation-editor) {
+        /* flex-basis 必须是 auto：否则内容高度传不上去、盒子长不高（固定 basis 0 时内容只会溢出） */
+        flex: 1 1 auto;
+        min-height: 0;
+      }
+
+      :deep(.editor-surface) {
+        border: none;
+        border-radius: 0;
+        padding: 12px;
+        max-height: 45vh;
+        overflow-y: auto;
+
+        &:hover,
+        &:focus {
+          border-color: transparent;
+          box-shadow: none;
+        }
+      }
+    }
+
     :deep(.ant-input) {
       flex: 1;
       border-radius: 12px;
@@ -1984,13 +2166,12 @@ defineExpose({
   }
 
   .input-actions {
-    position: absolute;
-    bottom: 8px;
-    left: 8px;
-    right: 8px;
+    /* 正常流：在盒子底部、编辑器之下，文字永远不会流到它后面（DeepSeek 形态） */
+    flex-shrink: 0;
     display: flex;
     align-items: center;
     gap: 8px;
+    padding: 0 8px 8px;
     pointer-events: none;
 
     .left-actions,
@@ -2129,14 +2310,12 @@ defineExpose({
 /* ===== Hero 模式（对话入口态）===== */
 .base-chat--hero {
   justify-content: center;
+  /* 纯居中会把输入框推到视口中线偏下；底部留白让整组（标题+输入框）略上移，视线落点更舒服 */
+  padding-bottom: 12%;
 
   .chat-messages-wrap {
     flex: 0 0 auto;
     overflow: visible;
-  }
-
-  .resize-handle {
-    display: none;
   }
 
   .chat-input {
@@ -2146,6 +2325,36 @@ defineExpose({
     border: none;
     background: transparent;
     box-shadow: none;
+  }
+
+  .hero-below {
+    flex: 0 0 auto;
+    width: min(820px, 92%);
+    margin: -12px auto 0;
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 8px 10px;
+  }
+
+  .hero-question {
+    font: inherit;
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--aichat-hero-question-text, var(--text-primary, rgba(0, 0, 0, 0.85)));
+    opacity: 0.75;
+    white-space: nowrap;
+    padding: 3px 14px;
+    border: 1px dashed var(--aichat-hero-question-border, var(--aichat-hero-question-border-fallback, rgba(0, 0, 0, 0.3)));
+    border-radius: 999px;
+    background: transparent;
+    cursor: pointer;
+    transition: opacity 0.2s, border-color 0.2s;
+
+    &:hover {
+      opacity: 1;
+      border-color: var(--aichat-hero-question-border-hover, var(--primary-color, #1677ff));
+    }
   }
 }
 

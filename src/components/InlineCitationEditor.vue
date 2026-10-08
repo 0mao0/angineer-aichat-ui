@@ -186,7 +186,9 @@ const updateCitationPopoverPosition = (anchor: HTMLElement) => {
   const verticalGap = 2
   const availableBelow = viewportHeight - rect.bottom - horizontalMargin
   const availableAbove = rect.top - horizontalMargin
-  const placeBelow = availableBelow >= 220 || availableBelow >= availableAbove
+  // 优先向上（用户定式 2026-10-04）：hover 输入区引用时弹框向下会压住输入框/操作行，
+  // 向上落在消息区无遮挡；仅当上方放不下最小可视高度（140）时才向下兜底
+  const placeBelow = availableAbove < 140 && availableBelow > availableAbove
   const maxHeight = Math.max(
     140,
     Math.min(panelMaxHeight, placeBelow ? availableBelow - verticalGap : availableAbove - verticalGap)
@@ -197,12 +199,22 @@ const updateCitationPopoverPosition = (anchor: HTMLElement) => {
     horizontalMargin,
     viewportWidth - panelWidth - horizontalMargin
   )
-  const top = placeBelow
-    ? clamp(rect.bottom + verticalGap, horizontalMargin, viewportHeight - maxHeight - horizontalMargin)
-    : clamp(rect.top - maxHeight - verticalGap, horizontalMargin, viewportHeight - maxHeight - horizontalMargin)
+  if (placeBelow) {
+    const top = clamp(rect.bottom + verticalGap, horizontalMargin, viewportHeight - maxHeight - horizontalMargin)
+    citationPopoverStyle.value = {
+      left: `${left}px`,
+      top: `${top}px`,
+      width: `${panelWidth}px`,
+      maxHeight: `${maxHeight}px`
+    }
+    return
+  }
+  // 向上展开：锚底边（bottom）贴近锚点顶边，弹框随内容高度向上生长。
+  // 此前按 maxHeight 预留顶边（top = rect.top - maxHeight），内容不足满高时
+  // 底边与锚点间留出 maxHeight−实际高度 的空隙（2026-10-04 验收：弹框离得太远）
   citationPopoverStyle.value = {
     left: `${left}px`,
-    top: `${top}px`,
+    bottom: `${viewportHeight - rect.top + verticalGap}px`,
     width: `${panelWidth}px`,
     maxHeight: `${maxHeight}px`
   }

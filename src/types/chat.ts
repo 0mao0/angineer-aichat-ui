@@ -41,6 +41,8 @@ export interface BaseChatCitation {
   content_type?: string
   score: number
   rich_media?: CitationRichMedia
+  /** 归属知识库（阶段三多库）：多库检索时宿主按此定位溯源面板；缺省=宿主按主库回退 */
+  library_id?: string
 }
 
 /**
@@ -83,6 +85,8 @@ export interface AIChatCitation {
   content_type?: string
   score: number
   rich_media?: CitationRichMedia
+  /** 归属知识库（阶段三多库）：多库检索时宿主按此定位溯源面板；缺省=宿主按主库回退 */
+  library_id?: string
 }
 
 export interface AIChatMessage {
@@ -130,6 +134,16 @@ export interface ThinkingTraceStep {
   turn?: number
   isError?: boolean
   durationMs?: number
+  /** 事件到达墙钟（ms，epoch）：折叠头总耗时与相邻步间隔计算用（2026-09-27） */
+  atMs?: number
+  /** run 起点墙钟（ms，epoch，仅挂轨迹首步）：折叠头「总耗时」锚点，含分类等待（2026-09-30） */
+  wallStartMs?: number
+  /** 该工具调用是后端预检索（首轮直达，替模型先跑）：标题显示为「预检索」（2026-09-30） */
+  injected?: boolean
+  /** 并行预检复用时，预检方真实检索耗时（ms）：供「并行预检 / X.Xs」两行标注（2026-09-30） */
+  reusedMs?: number
+  /** 附注归属（'pair'=并入上一对工具步显示，不单独成步）：预检索完成说明用（2026-09-30） */
+  attach?: string
   citations?: AIChatCitation[]
   /** 工具返回的完整候选条目（knowledge_search/table_search/entity_search） */
   resultItems?: ThinkingTraceItem[]
@@ -156,6 +170,8 @@ export interface QueryRequest {
   scene?: string
   session_id?: string
   library_id?: string
+  /** 多库勾选（阶段三）：非空时 library_id 兼容=首项；空/缺省=单库（library_id） */
+  library_ids?: string[]
   doc_ids?: string[]
   config?: string
   mode?: string

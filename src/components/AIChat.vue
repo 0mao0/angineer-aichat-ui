@@ -23,8 +23,14 @@
     :search-citations="searchInlineCitations"
     :render-message="renderAIChatMessage"
     :hero="hero"
+    :suggested-questions="suggestedQuestions"
+    :show-new-chat="showNewChat"
+    :new-chat-label="newChatLabel"
+    @new-chat="emit('newChat')"
     :library-options="libraryOptions"
     :library-value="libraryValue"
+    :library-multi="libraryMulti"
+    :library-values="libraryValues"
     :queued-messages="queuedMessages"
     :mention-label="mentionMode === 'document' ? '提及文档 @' : '插入引用 @'"
     @send="handleSend"
@@ -36,8 +42,10 @@
     @ready="handleReady"
     @select-citation="handleSelectCitation"
     @update:library-value="emit('update:libraryValue', $event)"
+    @update:library-values="emit('update:libraryValues', $event)"
   >
     <template #hero><slot name="hero" /></template>
+    <template v-if="$slots['hero-below']" #hero-below><slot name="hero-below" /></template>
   </BaseChat>
 </template>
 
@@ -76,6 +84,12 @@ interface Props {
   libraryId?: string
   /** Hero 模式（透传 BaseChat）：无消息时展示居中大输入卡片 */
   hero?: boolean
+  /** Hero 空态引导问题（透传 BaseChat）：点击即直发；不传或空数组不渲染（可开可关），内容归宿主定 */
+  suggestedQuestions?: string[]
+  /** 对话态输入框上方显示「新对话」浮层按钮（透传 BaseChat；hero 空态不出现） */
+  showNewChat?: boolean
+  /** 新对话浮层按钮文案 */
+  newChatLabel?: string
   /** 数据传输层注入；不传时组件退化为纯 UI（模型列表为空、无法发送） */
   transport?: AIChatTransport
   /**
@@ -87,6 +101,10 @@ interface Props {
   libraryOptions?: Array<{ value: string; label: string }>
   /** 当前选中的知识库 id */
   libraryValue?: string
+  /** 多库勾选集合（阶段三）；配合 library-multi 启用多选选择器 */
+  libraryValues?: string[]
+  /** 多选模式开关（默认 false=单选，向后兼容） */
+  libraryMulti?: boolean
   /** 模型选择器显隐（默认 true；游客态宿主传 false，不展示可选模型） */
   showModelSelect?: boolean
 }
@@ -104,17 +122,23 @@ const props = withDefaults(defineProps<Props>(), {
   sessionId: 'default',
   libraryId: 'default',
   hero: false,
+  suggestedQuestions: () => [],
+  showNewChat: false,
+  newChatLabel: '新对话',
   transport: undefined,
   mentionMode: 'reference',
   libraryOptions: () => [],
   libraryValue: '',
+  libraryValues: () => [],
+  libraryMulti: false,
   showModelSelect: true
 })
 
 interface ModelOption { value: string; label: string }
 
 const emit = defineEmits<{
-  send: [message: string, model: string]
+  send: [message: string, model?: string]
+  newChat: []
   ready: []
   removeContext: [id: string]
   error: [error: Error]
@@ -122,10 +146,13 @@ const emit = defineEmits<{
   selectCitation: [citation: AIChatCitation]
   messagesChange: [messages: AIChatMessage[]]
   'update:libraryValue': [libraryId: string]
+  'update:libraryValues': [libraryIds: string[]]
 }>()
 
 const sessionIdRef = computed(() => props.sessionId)
 const libraryIdRef = computed(() => props.libraryId)
+// 多库集合（阶段三）：空数组=未提供，useAIChat 载荷不带 library_ids（旧宿主逐位不变）
+const libraryIdsRef = computed(() => props.libraryValues)
 
 const {
   messages,
@@ -150,6 +177,7 @@ const {
   defaultModel: props.defaultModel,
   systemPrompt: props.systemPrompt,
   libraryId: libraryIdRef,
+  libraryIds: libraryIdsRef,
   scene: props.scene,
   sessionId: sessionIdRef,
   getContextItems: () => props.contextItems,
@@ -189,8 +217,8 @@ const fetchModels = async () => {
   }
 }
 
-/** 处理用户发送消息 */
-const handleSend = async (payload: string | BaseChatSendPayload, model: string) => {
+/** 处理用户发送消息；model 缺省时 sendMessage 走组件内默认选中（供宿主引导问题直发） */
+const handleSend = async (payload: string | BaseChatSendPayload, model?: string) => {
   const normalizedPayload: BaseChatSendPayload = typeof payload === 'string'
     ? { content: payload, citations: [] }
     : payload
