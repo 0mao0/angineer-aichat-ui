@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.2.1
+
+- feat: 思考链路展示细化——① 每步前置时间 tag（浅蓝胶囊，首步 `0.3s` 无前缀、其余 `+1.5s`，取步骤 `duration_ms`；不足 50ms 不显示，消灭 `+0.0s` 噪声）；②「并行预检」两行 tag（置于序号列与时间 tag 同一竖线，第二行给出预检方真实耗时 `reusedMs`），要求调用-返回配对完成才显示，修流式期间 `tool_start` 先到闪 tag、`tool_end` 到达又被顶掉；③ 多行便签渲染（note 详情按换行拆「首行标题 + 逐行正文」）；④ 预检索合步（`attach:'pair'` 的便签并入上一对工具步为附注行，步数 8→7）与标题改写（`injected` 步显示「预检索：knowledge_search」）；⑤ 折叠头总耗时改锚在 `wallStartMs`（挂轨迹首步的 run 起点墙钟，分类等待计入），各步 tag 之和才与总账对上；⑥ 命中引用按文档归并（同文档多处引用合为一枚 `×N` chip、按引用次数排序、>8 篇折叠 `+N`、标签用可读规范名）；⑦ 两列布局对齐（序号+时间标签进 66px 左栏，正文/调用结果/命中引用统一到同一条文字列）
+- feat: 输入区交互重构——编辑器随内容自动长高（上限 45vh 后内部滚动），底部操作行从悬浮覆盖改正常流（修「长文本撑破输入框、操作行浮到框中段、文字与组件重合」）；边框/焦点环从编辑器挪到新 `.input-box` 整盒（`:focus-within` 亮环）；描边三级链＝宿主钩子 > 包内档位兜底 > 浅色默认（暗色值落私有变量，避免压掉 hover/焦点环）；移除输入框 resizer（auto-grow 后它只剩「空闲基础高度」一个作用，且与 45vh 上限规则打架）
+- feat: 新对话入口从顶栏迁到对话态输入框上方浮层——`BaseChat` 新增 `showNewChat` / `newChatLabel` props 与 `newChat` 事件（`AIChat` 透传，`ChatTopBar` 删按钮），与「回底部」同右对齐叠放；hero 空态不出现
+- feat: hero 空态引导问题 props 化——`suggestedQuestions` 贯穿 `AIChat` → `BaseChat`，点击 chip 直发（与手动发送同 emit 链路、同恢复跟随）；不传或空数组整块不渲染，`hero-below` 插槽保留共存
+- feat: 流式自动跟随可被用户上滑打断 + 「回底部」按钮——仅在 `scrollHeight` 未变时才判用户上滑（流式 markdown 重排瞬间收缩 `scrollHeight` 会令浏览器截断 `scrollTop`，酷似上滑；首版实测第一次发问即误解除），另挂 `@wheel` 快路径作明确回看意图；48px 阈值内或重新发送即恢复跟随
+- feat: 多库勾选问答（阶段三）——主选择器多选 ≤5，新导出常量 `MAX_LIBRARY_SELECTION`（与服务端 `ANGINEER_MAX_CHAT_LIBRARIES` 兜底截断同值）；请求载荷集合化（消息类型新增 `library_ids`，非空时 `library_id` 兼容取首项）；本地缓存改单桶；引用溯源按库定位（消息类型新增 `library_id`，缺省=宿主按主库回退）；多选收口显示「N 个知识库」；库名登录后补加载、空库警示横幅随最近一次请求、库下拉面板加宽防库名截断
+- feat: 输入区左下角 `@` 与知识库选择器位置对调（库选择器在前、`@` 提及按钮在后），纯模板兄弟节点换序
+- fix: 公式渲染归一化未转义 `%`——模型照抄规范原文 `R_{1\%}` 的裸文本形态（`1%`/`2%` 记法）被 KaTeX 当注释符解析、整条公式渲染报错；`renderFormula` 剥定界后统一转义（负向回查不重复转义已写对的 `\%`），对任意模型的裸文本公式形态免疫
+- fix: 浅色可读性三连——① 问答气泡加 1px 描边（宿主按主题给色，浅色可见细线／深色 transparent）；②「回答中」气泡与落下后同底色（原流式淡蓝与落下不同色）；③ 内联角标改双主题统一深灰圆（hover 仍主色蓝），角标 token 三件套只留 `:root` 一处防漂移
+- fix: `index.less` 暗色段选择器补 `html.dark`（宿主只挂类名、`data-theme` 从未落地，此前该段对宿主整段失效）
+- fix: `loadMessages` 收口剔除服务端历史里的 agent 内部消息（首轮直达注入的 `tool_calls` 围栏/JSON assistant 不再渲染成 JSON 代码块气泡）；删除前端合成的「汇总证据并生成最终回答」标记行（分组层加历史兼容过滤清旧数据）；「回到最下方」改名「回底部」（正文、悬浮提示、注释同步）
+- fix: `@` 引用 hover 预览卡贴紧锚点并优先向上展开——改 `bottom` 锚定，内容不足满高时不再留 `maxHeight − 实高` 的空隙
+- test: 新增 markdown 公式渲染 4 例与多库 `useAIChat` 用例（`node:module` 注册 css 空模块 loader，解 katex ESM import css 在 `tsx --test` 下的 `ERR_UNKNOWN_FILE_EXTENSION`）
+
 ## 0.2.0
 
 - feat: 等待体验三件套——① 中间答案折叠留痕：新回调 `onInterimAnswer`，turn_start/边界规则改写/run_end 权威覆盖发生真实替换时，被顶替的正文快照收进置灰折叠块（流式区+最终气泡两处可展开回看），不再直接蒸发；② 分段进度：新回调 `onStage`（run_start→classify / tool_start→search / 首 delta→generate），`progressStage` + `elapsedSeconds`，等待文案从全程「思考中...」改为「意图理解…→检索规范库…（实时秒数）→生成回答…」；③ 流式重渲节流：onDelta 50ms 合帧写 currentStreamContent（改前每 delta 全量重解析 markdown，长答案 O(n²) 越打越卡）
