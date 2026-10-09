@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.2
+
+- breaking: 多库选择去上限——删除导出常量 `MAX_LIBRARY_SELECTION`，勾选不再截断、提示文案去掉「≤5」（业主口径「选了 N 个组 M 个库就该 M 个库去检索」，服务端 `ANGINEER_MAX_CHAT_LIBRARIES` 截断同批移除，>20 库只记 warning）；消费方此前 import 该常量会编译报错
+- breaking: 类型 `BaseChatModelOption` 移除，模型选项改由新导出 `BaseChatModelGroup`（`{ key, label, levels: [{ label, value }] }`）表达；另新增导出 `BaseChatLibrarySection`（`{ key, label, libraries: [{ id, name }] }`）
+- feat: 模型 × 思考等级两个下拉——`BaseChat` 新增 `model-groups` prop（`levels[0]`=该模型默认档、`level.value`=发送给后端的配置名；空列表则整个模型区不渲染），换模型落到该模型默认档，组内只有一档（该模型无变体）时档位下拉自动隐藏；`AIChat` 自动按底层 `model` 归并 `transport.fetchModels()` 结果生成分组，无需宿主准备。档位后缀约定 `<端点>-<系列>-<档位>`：「无后缀别名 / `-off` / `-ctk`」是思考关闭的三种参数写法 → 统一显示「关」且只出一条（取值优先级 无后缀别名 > `-off` > `-ctk`），`-xhigh` 显示「思考」（底层原值在悬停提示里）；未登记的后缀按原样单列，配置不会从选择器静默消失；付费模型沉底排序沿用
+- feat: 知识库「组 → 库」两级勾选——`BaseChat` 新增 `library-sections` prop（`AIChat` 透传），组行整勾/组内库行单勾都写回 `libraryValues`（保序追加/移除、不重排已有选择；不在分组清单内的 id 原样保留）；默认按组折叠、整行为展开热区（点复选框方块只切勾选，点名字/箭头/空白才展开收起），组行右侧显示「已选/总数」；不传 `library-sections` 沿用平铺选项，宿主未接两级结构时逐位不变
+- fix: 模型选中值悬空——`syncSelectedModel` 改为「现值仍属于某个分组才保留」，`defaultModel` 也不在分组内时回退第一组首档；`fetchModels` 失败改为空分组（不再回退「默认模型」假项，模型区据此不渲染）
+- fix: 两级下拉点行体不再夺走选择器焦点（组头行 `@mousedown.prevent`）——否则 select 失焦被 antd 判成「点到外面」、点组名即关下拉（仅真实点击可复现，合成事件测不出）
+- style: 底栏三个下拉去填充底色只留描边（套盒两层视觉太丑）、宽度自适应内容（`min-width` 归零，「关」一个字不再占 84px；上限仍留，防超长模型名/库名撑破底栏）；多选态 antd 自带 chip 底色与内圈边框一并去掉，避免与选择器外框叠成双层；思考等级下拉上限再收一档（120px，窄屏 96px）
+- docs: README 补「模型 × 思考等级」「多库勾选」两节（props 契约与分组数据结构）
+
 ## 0.2.1
 
 - feat: 思考链路展示细化——① 每步前置时间 tag（浅蓝胶囊，首步 `0.3s` 无前缀、其余 `+1.5s`，取步骤 `duration_ms`；不足 50ms 不显示，消灭 `+0.0s` 噪声）；②「并行预检」两行 tag（置于序号列与时间 tag 同一竖线，第二行给出预检方真实耗时 `reusedMs`），要求调用-返回配对完成才显示，修流式期间 `tool_start` 先到闪 tag、`tool_end` 到达又被顶掉；③ 多行便签渲染（note 详情按换行拆「首行标题 + 逐行正文」）；④ 预检索合步（`attach:'pair'` 的便签并入上一对工具步为附注行，步数 8→7）与标题改写（`injected` 步显示「预检索：knowledge_search」）；⑤ 折叠头总耗时改锚在 `wallStartMs`（挂轨迹首步的 run 起点墙钟，分类等待计入），各步 tag 之和才与总账对上；⑥ 命中引用按文档归并（同文档多处引用合为一枚 `×N` chip、按引用次数排序、>8 篇折叠 `+N`、标签用可读规范名）；⑦ 两列布局对齐（序号+时间标签进 66px 左栏，正文/调用结果/命中引用统一到同一条文字列）
