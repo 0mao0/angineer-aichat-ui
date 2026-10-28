@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.3
+
+- feat: 回答图表化 v1（angineer 块协议）——markdown 渲染拦截 angineer-chart/angineer-map 代码块（占位/回退/普通代码块隔离）；chartBlock 以 echarts 按需渲染 bar/line/pie、暗色双选择器、脱离文档实例回收；BaseChat debounce 接线 + 块容器样式双主题；量级悬殊 ≥5 倍自动挂双 y 轴（大小两方向都判 + 防除零）；补 TitleComponent（echarts 按需模式下图标题此前不渲染）
+- feat: SOP 流程聊天可视化——SSE sop_flow 快照通道 + SopFlowPanel 步骤卡（可折叠）；「流程图」抽屉（定义画布 + 本次执行着色）；步骤行展示「参数=值 → 结果」
+- fix(citations): Kxx 引用标记容忍括号内空格（渲染、过滤、守卫三层同修）；引用点击丢文库归属——多库会话点圈码/内联链接不再回退首库（404）
+- feat: hero 引导问题支持分行形态（长题面截断 + 悬停看全文）；流程图抽屉宽度收窄
+- chore: 许可统一 MIT
+
+
 ## 0.2.2
 
 - breaking: 多库选择去上限——删除导出常量 `MAX_LIBRARY_SELECTION`，勾选不再截断、提示文案去掉「≤5」（业主口径「选了 N 个组 M 个库就该 M 个库去检索」，服务端 `ANGINEER_MAX_CHAT_LIBRARIES` 截断同批移除，>20 库只记 warning）；消费方此前 import 该常量会编译报错
