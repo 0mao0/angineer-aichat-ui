@@ -105,6 +105,24 @@ export const parseMarkerNumber = (marker?: string | null): number | undefined =>
   return match ? Number(match[1]) : undefined
 }
 
+/**
+ * 正文引用标记匹配（带 g 标志，每次调用返回新实例，避免 lastIndex 串扰）。
+ * 容忍括号内空白：模型输出不保证无空格（如 `[ K32]`、`[K 32]`），
+ * 只认紧形式 `[K32]` 的正则会把带空格标记整个漏判成纯文本。
+ */
+export const citationMarkerRe = (): RegExp => /\[\s*([KTE]\s*\d+)\s*\]/g
+
+/** `[ K32]` → `K32`：归一化后才与 citation.marker 比对。 */
+export const normalizeCitationMarker = (marker: string): string => marker.replace(/\s+/g, '')
+
+/** 正文里是否写了该标记（同样容忍括号内空白）。 */
+export const hasCitationMarker = (content: string, marker?: string | null): boolean => {
+  const letter = String(marker || '').match(/[KTE]/)?.[0]
+  const num = String(marker || '').match(/\d+/)?.[0]
+  if (!letter || !num) return false
+  return new RegExp(`\\[\\s*${letter}\\s*${num}\\s*\\]`).test(content)
+}
+
 export const buildInlineCitationTagHtml = (
   citation: BaseChatCitation,
   index: number,
@@ -121,6 +139,9 @@ export const buildInlineCitationTagHtml = (
     ` data-page-idx="${Number(citation.page_idx || 0)}"`,
     ` data-section-path="${escapeHtmlAttribute(citation.section_path || '')}"`,
     ` data-snippet="${escapeHtmlAttribute(citation.snippet || '')}"`,
+    // 归属库随标记一起下发：点击走事件委托、按 data-* 重建引用，漏掉它只能回退宿主主库，
+    // 多库会话里非主库文档必 404（2026-10-16 本地 6 库会话实踩）
+    ` data-library-id="${escapeHtmlAttribute(citation.library_id || '')}"`,
     ` title="${escapeHtmlAttribute(hover)}"`,
     `>${number}</span>`,
   ].join('')
@@ -299,6 +320,7 @@ export const findMentionAtCaret = (
 export const mapReferenceToBaseChatCitation = (reference: CitationReference): BaseChatCitation => ({
   target_id: reference.targetId,
   target_type: reference.targetType,
+  library_id: reference.libraryId,
   doc_id: reference.docId,
   doc_title: reference.docTitle,
   page_idx: Number(reference.pageIdx || 0),

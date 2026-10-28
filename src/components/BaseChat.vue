@@ -147,6 +147,17 @@
                 </div>
               </div>
 
+              <!-- SOP 流程图（历史消息）：默认折叠，点击 header 展开 -->
+              <SopFlowPanel
+                v-if="(msg.sop_flows || []).length"
+                :flows="msg.sop_flows || []"
+                :default-expanded="false"
+              >
+                <template v-if="$slots['sop-flow-action']" #flow-action="scope">
+                  <slot name="sop-flow-action" v-bind="scope" />
+                </template>
+              </SopFlowPanel>
+
               <div class="answer-text" v-html="renderAssistantContent(msg)" />
               <details v-for="(interim, iIdx) in (msg.interim_answers || [])" :key="iIdx" class="interim-answer">
                 <summary>中间输出（已被最终回答顶替，点击展开）</summary>
@@ -183,6 +194,16 @@
                 </div>
               </div>
             </div>
+            <!-- SOP 流程图：执行期实时展开（流式态即进度），run 结束收进消息后按历史消息折叠 -->
+            <SopFlowPanel
+              v-if="streamingSopFlows?.length"
+              :flows="streamingSopFlows"
+              :default-expanded="true"
+            >
+              <template v-if="$slots['sop-flow-action']" #flow-action="scope">
+                <slot name="sop-flow-action" v-bind="scope" />
+              </template>
+            </SopFlowPanel>
             <details v-for="(interim, idx) in interimAnswers" :key="idx" class="interim-answer">
               <summary>中间输出（已被最终回答顶替，点击展开）</summary>
               <div class="interim-answer-body">{{ interim }}</div>
@@ -306,6 +327,7 @@
               :dropdown-match-select-width="false"
               :dropdown-style="{ minWidth: '200px' }"
               @update:value="onLibrarySelectChange"
+              @dropdown-visible-change="(v: boolean) => v && emit('libraryDropdownOpen')"
             >
               <!-- 多库收口（用户定式 2026-10-04）：勾选 >1 库时不逐个出 tag，折叠占位统一显示「N 个知识库」；
                    单库仍显示库名 tag。maxTagCount=0 经 vc-overflow 确认渲染 0 tag + 1 rest（4.2.6）。 -->
@@ -440,18 +462,36 @@
 
     <!-- Hero 态专属扩展区（引导问题/站点特色徽标等），会话开始即隐藏；宿主未传 slot 且无引导问题时整块不渲染 -->
     <div
-      v-if="hero && !displayMessages.length && !loading && !currentStreamContent && ($slots['hero-below'] || suggestedQuestions.length)"
+      v-if="hero && !displayMessages.length && !loading && !currentStreamContent && ($slots['hero-below'] || suggestedQuestions.length || suggestedQuestionRows.length)"
       class="hero-below"
     >
-      <button
-        v-for="question in suggestedQuestions"
-        :key="question"
-        type="button"
-        class="hero-question"
-        @click="handleSuggestedQuestion(question)"
-      >
-        {{ question }}
-      </button>
+      <!-- 分行形态（可选，2026-10-16）：每行独立居中的 flex 行——长题面截断展示，不靠自动换行猜行界 -->
+      <template v-if="suggestedQuestionRows.length">
+        <div v-for="(row, rowIdx) in suggestedQuestionRows" :key="rowIdx" class="hero-question-row">
+          <button
+            v-for="question in row"
+            :key="question"
+            type="button"
+            class="hero-question"
+            :title="question"
+            @click="handleSuggestedQuestion(question)"
+          >
+            {{ question }}
+          </button>
+        </div>
+      </template>
+      <template v-else>
+        <button
+          v-for="question in suggestedQuestions"
+          :key="question"
+          type="button"
+          class="hero-question"
+          :title="question"
+          @click="handleSuggestedQuestion(question)"
+        >
+          {{ question }}
+        </button>
+      </template>
       <slot name="hero-below" />
     </div>
   </div>
@@ -462,7 +502,7 @@
  * 基础聊天组件。
  * 负责通用聊天 UI、输入区交互与消息展示，不直接耦合具体知识域接口。
  */
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   ClearOutlined,
   SendOutlined,
@@ -478,6 +518,7 @@ import {
 import CitationInline from './CitationInline.vue'
 import InlineCitationEditor from './InlineCitationEditor.vue'
 import ThinkingSteps from './ThinkingSteps.vue'
+import SopFlowPanel from './SopFlowPanel.vue'
 import type {
   BaseChatCitation,
   BaseChatContextItem,
@@ -488,13 +529,17 @@ import type {
   CitationBinding,
   InlineCitationCandidate,
   ThinkingTraceStep,
+  SopFlowState,
   QueuedMessage
 } from '../types'
 import {
   buildInlineCitationTagHtml,
   buildCitationSegments,
+  citationMarkerRe,
   getCitationLastSegment,
+  hasCitationMarker,
   mapReferenceToBaseChatCitation,
+  normalizeCitationMarker,
   parseMarkerNumber,
 } from '../utils/citation'
 import {
@@ -504,6 +549,7 @@ import {
   thinkingWallMs,
 } from '../utils/thinking'
 import { formatTokenCount } from '../utils/token'
+import { mountChartBlocks, startChartThemeObserver } from '../utils/chartBlock'
 import { message } from 'ant-design-vue'
 import { QUEUE_LIMIT } from '../composables/useAIChat'
 
@@ -527,6 +573,8 @@ interface Props {
   contextTokens?: number
   contextRounds?: number
   streamingThinkingSteps?: ThinkingTraceStep[]
+  /** 流式期 SOP 流程快照（宿主从 useAIChat.liveSopFlows 传入，run 结束收进消息后清空） */
+  streamingSopFlows?: SopFlowState[]
   /** 中间轮被顶替的正文快照（拒答重答/截断重试），流式期间置灰折叠展示 */
   interimAnswers?: string[]
   /** 等待期阶段（classify/search/generate），驱动分段进度文案；空串退回「思考中...」 */
@@ -539,6 +587,9 @@ interface Props {
   hero?: boolean
   /** Hero 空态引导问题：点击即按该问题直发；不传或空数组不渲染（可开可关），内容归宿主定 */
   suggestedQuestions?: string[]
+  /** 分行引导问题（可选）：每行一条 flex 行，行内不自动换行即可控行界；与 suggestedQuestions 二选一，
+   *  两者都传时本项优先。长题面按钮自动省略号截断，title 悬停看全文，点击同样直发 */
+  suggestedQuestionRows?: string[][]
   /** 对话态在输入框上方左侧显示「新对话」浮层按钮（hero 空态不出现）；点击只发 newChat 事件，会话重置归宿主 */
   showNewChat?: boolean
   /** 新对话浮层按钮文案 */
@@ -575,10 +626,12 @@ const props = withDefaults(defineProps<Props>(), {
   contextTokens: 0,
   contextRounds: 0,
   streamingThinkingSteps: () => [],
+  streamingSopFlows: () => [],
   renderMessage: undefined,
   searchCitations: undefined,
   hero: false,
   suggestedQuestions: () => [],
+  suggestedQuestionRows: () => [],
   showNewChat: false,
   newChatLabel: '新对话',
   mentionLabel: '插入引用 @',
@@ -603,6 +656,9 @@ const emit = defineEmits<{
   selectCitation: [citation: BaseChatCitation]
   'update:libraryValue': [libraryId: string]
   'update:libraryValues': [libraryIds: string[]]
+  /** 库选择下拉展开（2026-10-26）：宿主借此在数据源仍为空时补拉一次——
+   *  页面加载窗口内后端不可达时，选择器不再卡「其他+原始 id」兜底态直到刷新 */
+  libraryDropdownOpen: []
   /** 删除一条待发送消息 */
   removeQueued: [id: string]
   /** 插队：打断当前生成并立即发送该条 */
@@ -903,16 +959,17 @@ const renderContent = (content: string, streamingCitations?: BaseChatCitation[])
     : escapeHtml(content).replace(/\n/g, '<br />')
   if (streamingCitations?.length) {
     // 标记 → tag：流式期间即可显示引用框（与完成态一致，避免结束后跳变）
-    const markerHtml = html.replace(/\[([KTE]\d+)\]/g, (raw, marker: string) => {
-      const index = streamingCitations.findIndex(citation => citation.marker === marker)
+    const markerHtml = html.replace(citationMarkerRe(), (raw, marker: string) => {
+      const normalized = normalizeCitationMarker(marker)
+      const index = streamingCitations.findIndex(citation => citation.marker === normalized)
       if (index < 0) return raw
-      return buildInlineCitationTagHtml(streamingCitations[index], index, parseMarkerNumber(marker))
+      return buildInlineCitationTagHtml(streamingCitations[index], index, parseMarkerNumber(normalized))
     })
     return markerHtml
   }
-  // 流式占位：只替换已完整出现的 [K1]/[T1]/[E1]，未闭合的 [K 保持原样
-  return html.replace(/\[([KTE]\d+)\]/g, (_raw, marker: string) =>
-    `<span class="stream-citation-marker">${parseMarkerNumber(marker) ?? 0}</span>`)
+  // 流式占位：只替换已完整出现的 [K1]/[T1]/[E1]（含括号内空格形态），未闭合的 [K 保持原样
+  return html.replace(citationMarkerRe(), (_raw, marker: string) =>
+    `<span class="stream-citation-marker">${parseMarkerNumber(normalizeCitationMarker(marker)) ?? 0}</span>`)
 }
 
 /**
@@ -928,9 +985,9 @@ const renderAssistantContent = (message: BaseChatMessage): string => {
     // 第一轮：优先匹配“文档 + 章节”的完整短语，避免同名文档挂错引用
     const matchedIndexes = new Set<number>()
     citations.forEach((citation, index) => {
-      // 正文已经写了 [Kx] 标记时，交给“标记 → 内联 tag”替换，
+      // 正文已经写了 [Kx] 标记时（含 `[ Kx]` 空格形态），交给“标记 → 内联 tag”替换，
       // 不再把文档名/章节名单独做成链接，避免同一处出现两个可点元素
-      if (citation.marker && content.includes(`[${citation.marker}]`)) return
+      if (hasCitationMarker(content, citation.marker)) return
       const spanCandidates = buildSectionCitationCandidates(citation)
       for (const needle of spanCandidates) {
         const positions: number[] = []
@@ -954,7 +1011,7 @@ const renderAssistantContent = (message: BaseChatMessage): string => {
     // 第二轮：正文只写了文档名时，兜底把文档名变成链接
     citations.forEach((citation, index) => {
       if (matchedIndexes.has(index)) return
-      if (citation.marker && content.includes(`[${citation.marker}]`)) return
+      if (hasCitationMarker(content, citation.marker)) return
       const spanCandidates = buildDocOnlyCitationCandidates(citation)
       for (const needle of spanCandidates) {
         const positions: number[] = []
@@ -980,10 +1037,11 @@ const renderAssistantContent = (message: BaseChatMessage): string => {
     : escapeHtml(content).replace(/\n/g, '<br />')
 
   // 标记 → tag 放在最后：tag 内包含“《文档》· 章节”文本，若先替换会被旧匹配二次命中
-  const markerHtml = html.replace(/\[([KTE]\d+)\]/g, (raw, marker: string) => {
-    const index = citations.findIndex(citation => citation.marker === marker)
+  const markerHtml = html.replace(citationMarkerRe(), (raw, marker: string) => {
+    const normalized = normalizeCitationMarker(marker)
+    const index = citations.findIndex(citation => citation.marker === normalized)
     if (index < 0) return raw
-    return buildInlineCitationTagHtml(citations[index], index, parseMarkerNumber(marker))
+    return buildInlineCitationTagHtml(citations[index], index, parseMarkerNumber(normalized))
   })
 
   return markerHtml.replace(/__INLINE_CIT_(\d+)__/g, (_, rawIndex) => {
@@ -1000,6 +1058,8 @@ const renderAssistantContent = (message: BaseChatMessage): string => {
       ` data-page-idx="${Number(citation.page_idx || 0)}"`,
       ` data-section-path="${escapeHtml(citation.section_path || '')}"`,
       ` data-snippet="${escapeHtml(citation.snippet || '')}"`,
+      // 归属库随内联链接一起下发（点击事件委托按 data-* 重建引用，见 handleMessageClick）
+      ` data-library-id="${escapeHtml(citation.library_id || '')}"`,
       `>${escapeHtml(link.label)}</a>`,
     ].join('')
   })
@@ -1077,6 +1137,9 @@ const handleMessageClick = (event: MouseEvent) => {
     page_idx: Number(target.dataset.pageIdx || 0),
     section_path: String(target.dataset.sectionPath || ''),
     snippet: String(target.dataset.snippet || ''),
+    // 归属库必须随 data-* 带回来：宿主按 library_id 定位溯源面板，缺省只能回退主库，
+    // 多库会话里非主库文档必 404（2026-10-16 本地 6 库会话实踩）
+    library_id: String(target.dataset.libraryId || '') || undefined,
     score: 0,
   })
 }
@@ -1289,6 +1352,22 @@ const handleEditQueued = (item: QueuedMessage) => {
 
 watch(() => props.messages.length, () => scrollToBottom())
 watch(() => props.currentStreamContent, () => scrollToBottom())
+
+// angineer 图表块（协议 v1，docs/plan-aichat-chart-blocks.md）：v-html 重建 DOM 后
+// 后处理挂载 echarts。流式 delta 高频重建，debounce 150ms 只挂一次；
+// 已脱离文档的旧实例由 mountChartBlocks 内部 dispose 回收。
+let chartRemountTimer: ReturnType<typeof setTimeout> | undefined
+const scheduleChartMount = () => {
+  if (chartRemountTimer) clearTimeout(chartRemountTimer)
+  chartRemountTimer = setTimeout(() => {
+    nextTick(() => {
+      const root = messagesRef.value
+      if (root) mountChartBlocks(root)
+    })
+  }, 150)
+}
+watch(() => [props.messages.length, props.currentStreamContent], () => scheduleChartMount())
+
 watch(() => props.loading, value => {
   if (value) {
     resetComposer()
@@ -1301,7 +1380,13 @@ watch(() => props.modelGroups, syncSelectedModel, { deep: true, immediate: true 
 
 onMounted(() => {
   syncSelectedModel()
+  startChartThemeObserver()
+  scheduleChartMount()
   emit('ready')
+})
+
+onBeforeUnmount(() => {
+  if (chartRemountTimer) clearTimeout(chartRemountTimer)
 })
 
 defineExpose({
@@ -2475,6 +2560,25 @@ html.dark .hero-question,
     flex-wrap: wrap;
     justify-content: center;
     gap: 8px 10px;
+  }
+
+  /* 分行形态：每行独立 flex 行，行界可控（长题面按行摆放，不靠顶层自动换行猜边界） */
+  .hero-question-row {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 8px 10px;
+    width: 100%;
+
+    /* 第二行起（计算题等长题面）：只展示一部分——单按钮封顶「行容器三分之一」，
+       title 悬停看全文（2026-10-16）。封顶走百分比而非固定 266px：窄窗口
+       （如 771px 视口 → 710px 容器）也能一行放下三个（实踩：固定值把第三个挤下一行）。
+       首行短问法不受影响，按内容自然宽度排。 */
+    &:not(:first-child) .hero-question {
+      max-width: min(266px, calc((100% - 24px) / 3));
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
   }
 
   .hero-question {

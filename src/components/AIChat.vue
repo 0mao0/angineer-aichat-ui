@@ -17,6 +17,7 @@
     :context-tokens="contextTokens"
     :context-rounds="contextRounds"
     :streaming-thinking-steps="liveThinkingSteps"
+    :streaming-sop-flows="liveSopFlows"
     :interim-answers="interimAnswers"
     :progress-stage="progressStage"
     :elapsed-seconds="elapsedSeconds"
@@ -24,6 +25,7 @@
     :render-message="renderAIChatMessage"
     :hero="hero"
     :suggested-questions="suggestedQuestions"
+    :suggested-question-rows="suggestedQuestionRows"
     :show-new-chat="showNewChat"
     :new-chat-label="newChatLabel"
     @new-chat="emit('newChat')"
@@ -44,9 +46,13 @@
     @select-citation="handleSelectCitation"
     @update:library-value="emit('update:libraryValue', $event)"
     @update:library-values="emit('update:libraryValues', $event)"
+    @library-dropdown-open="emit('libraryDropdownOpen')"
   >
     <template #hero><slot name="hero" /></template>
     <template v-if="$slots['hero-below']" #hero-below><slot name="hero-below" /></template>
+    <template v-if="$slots['sop-flow-action']" #sop-flow-action="scope">
+      <slot name="sop-flow-action" v-bind="scope" />
+    </template>
   </BaseChat>
 </template>
 
@@ -89,6 +95,8 @@ interface Props {
   hero?: boolean
   /** Hero 空态引导问题（透传 BaseChat）：点击即直发；不传或空数组不渲染（可开可关），内容归宿主定 */
   suggestedQuestions?: string[]
+  /** 分行引导问题（透传 BaseChat，可选）：每行一条 flex 行；长题面省略号截断、title 看全、点击直发 */
+  suggestedQuestionRows?: string[][]
   /** 对话态输入框上方显示「新对话」浮层按钮（透传 BaseChat；hero 空态不出现） */
   showNewChat?: boolean
   /** 新对话浮层按钮文案 */
@@ -128,6 +136,7 @@ const props = withDefaults(defineProps<Props>(), {
   libraryId: 'default',
   hero: false,
   suggestedQuestions: () => [],
+  suggestedQuestionRows: () => [],
   showNewChat: false,
   newChatLabel: '新对话',
   transport: undefined,
@@ -151,6 +160,8 @@ const emit = defineEmits<{
   messagesChange: [messages: AIChatMessage[]]
   'update:libraryValue': [libraryId: string]
   'update:libraryValues': [libraryIds: string[]]
+  /** 库选择下拉展开（透传 BaseChat）：宿主补拉库名/分组数据 */
+  libraryDropdownOpen: []
 }>()
 
 const sessionIdRef = computed(() => props.sessionId)
@@ -163,6 +174,7 @@ const {
   loading,
   currentStreamContent,
   liveThinkingSteps,
+  liveSopFlows,
   systemWarning,
   contextTokens,
   contextRounds,
