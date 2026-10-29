@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.4
+
+- fix: 回答落定后思考卡片不再消失——`useAIChat` 写落定消息时，`thinking_trace` 从「只取 transport 返回值」改为「transport 返回值优先，缺省回退本轮流式 `onThinking` 快照」，两者都空则字段缺省、不落空数组（与 `sop_flows` 兜底同型）。只在 SSE status 帧推进思考步骤、done 帧不带轨迹的宿主（如 ABP 专业问答 `ask/stream`），回答结束后思考步骤（意图判断/处理链路/检索）仍保留在消息内；自带 `thinking_trace` 的宿主行为不变
+- test: `useAIChat` 新增三例——宿主仅流式上报时落定仍保留步骤、transport 自带轨迹优先于流式快照、整轮无步骤不落空数组
+
 ## 0.2.3
 
 - feat: 回答图表化 v1（angineer 块协议）——markdown 渲染拦截 angineer-chart/angineer-map 代码块（占位/回退/普通代码块隔离）；chartBlock 以 echarts 按需渲染 bar/line/pie、暗色双选择器、脱离文档实例回收；BaseChat debounce 接线 + 块容器样式双主题；量级悬殊 ≥5 倍自动挂双 y 轴（大小两方向都判 + 防除零）；补 TitleComponent（echarts 按需模式下图标题此前不渲染）
