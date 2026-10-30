@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.5
+
+- feat: 块级「参考依据」——正文一个行内标记都没写时，把消息 `citations` 按文档归并成 chip 行（按 `doc_id` 去重、`×N` 计数、最多 6 个，样式对齐 ThinkingSteps 的「命中引用」），点击走同一 `selectCitation` 定位；正文有标记时不渲染（行内 tag 已指出来源）。动机：模型照抄 `[K1]` 是概率性遵从——同题同模型两次，一次 4 个标记、一次 0 个，零标记回答的出处会整块消失
+- docs: 依赖宿主传入 `citations`（angineer-core 0.1.7 起由 `run_end` 下发；旧宿主不传时该块不出现，行为与升级前一致）
+
 ## 0.2.4
 
 - fix: 回答落定后思考卡片不再消失——`useAIChat` 写落定消息时，`thinking_trace` 从「只取 transport 返回值」改为「transport 返回值优先，缺省回退本轮流式 `onThinking` 快照」，两者都空则字段缺省、不落空数组（与 `sop_flows` 兜底同型）。只在 SSE status 帧推进思考步骤、done 帧不带轨迹的宿主（如 ABP 专业问答 `ask/stream`），回答结束后思考步骤（意图判断/处理链路/检索）仍保留在消息内；自带 `thinking_trace` 的宿主行为不变
