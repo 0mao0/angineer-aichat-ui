@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.7
+
+- perf: `BaseChat` 图表块改按需动态加载——echarts 移出宿主主 graph。`chartBlock`（含 echarts 静态 import 与 `use()` 注册）只在 v-html 重建后的 DOM 真的解析出 `.angineer-chart-block[data-chart]:not([data-mounted])` 容器时才 `await import`，主题监听随首次模块加载注册；动态加载失败不缓存 rejected、下次调度重试。动机：2026-11-13 外部宿主反馈——后端从不产出 angineer-chart 块的宿主（user-web / user-h5）生产构建专业问答页 chunk 219 KB gzip 含 echarts 纯死代码，dev 未预构建时一次进入额外拉约 800 个模块请求。验收：宿主只渲染普通 markdown 时入口与页面 chunk 不含 zrender（实测 ChatHome 分片 219→33.7 KB gzip），出现图表块时经懒加载分片正常挂载
+
 ## 0.2.6
 
 - fix: 「参考依据」块只收**正文真的提到的文档**（`citationMentionedInText`：标准编号优先，`JTG_T↔JTGT`、`DB51_T↔DB51/T` 等分隔符变体归一；无编号文档按去扩展名词干匹配且要求长度 ≥6；匹配不上不显示）。动机：2026-10-30 实拍——「回答时不要写引用标记」的指令被模型当成检索词，本轮命中的是无关文档，旧逻辑把候选集当出处展示，等于给用户一个错的出处
